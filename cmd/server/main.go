@@ -25,6 +25,7 @@ func main() {
 		log.Fatal(err)
 	}
 	defer st.Close()
+
 	r := gin.Default()
 
 	r.GET("/health", func(c *gin.Context) {
