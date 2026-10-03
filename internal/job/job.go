@@ -2,6 +2,7 @@ package job
 
 import (
 	"encoding/json"
+	"errors"
 	"time"
 )
 
@@ -23,7 +24,9 @@ type Job struct {
 	MaxAttempts int             `json:"max_attempts"`
 	RunAt       time.Time       `json:"run_at"`
 	CreatedAt   time.Time       `json:"created_at"`
-	StartedAt   time.Time       `json:"started_at"`
-	CompletedAt time.Time       `json:"completed_at"`
+	StartedAt   *time.Time      `json:"started_at"`
+	CompletedAt *time.Time      `json:"completed_at"`
 	Error       *string         `json:"error"`
 }
+
+var ErrNotFound = errors.New("job not found")
