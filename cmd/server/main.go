@@ -1,13 +1,30 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
+	"os"
+	"time"
 
+	"github.com/anandhubiju-dev/jobqueue/internal/store"
 	"github.com/gin-gonic/gin"
 )
 
 func main() {
+
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		log.Fatal("DATABASE_URL is not set")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	st, err := store.New(ctx, dbURL)
+	cancel()
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer st.Close()
 	r := gin.Default()
 
 	r.GET("/health", func(c *gin.Context) {
