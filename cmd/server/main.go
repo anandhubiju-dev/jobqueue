@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/anandhubiju-dev/jobqueue/internal/api"
 	"github.com/anandhubiju-dev/jobqueue/internal/service"
 	"github.com/anandhubiju-dev/jobqueue/internal/store"
 	"github.com/gin-gonic/gin"
@@ -28,13 +29,14 @@ func main() {
 	}
 	defer st.Close()
 
-	_ = service.New(st)
+	svc := service.New(st)
 
 	r := gin.Default()
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
+	api.New(svc).Register(r)
 
 	if err := r.Run(":8080"); err != nil {
 		log.Fatalf("Failed to run the server : %v", err)
