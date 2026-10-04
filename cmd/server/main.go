@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/anandhubiju-dev/jobqueue/internal/service"
 	"github.com/anandhubiju-dev/jobqueue/internal/store"
 	"github.com/gin-gonic/gin"
 )
@@ -26,6 +27,8 @@ func main() {
 		log.Fatal(err)
 	}
 	defer st.Close()
+
+	_ = service.New(st)
 
 	r := gin.Default()
 
