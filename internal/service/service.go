@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/anandhubiju-dev/jobqueue/internal/job"
+	"github.com/google/uuid"
 )
 
 type Store interface {
@@ -27,8 +27,8 @@ func New(store Store) *Service {
 var ErrInvalidJob = errors.New("invalid job")
 
 var validTypes = map[string]bool{
-	"email": true,
-	"report": true,
+	"email":        true,
+	"report":       true,
 	"notification": true,
 }
 
@@ -42,13 +42,13 @@ func (s *Service) Create(ctx context.Context, jobType string, payload json.RawMe
 
 	now := time.Now()
 	j := &job.Job{
-		ID: uuid.NewString(),
-		Type: jobType,
-		Payload: payload,
-		Status: job.StatusQueued,
+		ID:          uuid.NewString(),
+		Type:        jobType,
+		Payload:     payload,
+		Status:      job.StatusQueued,
 		MaxAttempts: 3,
-		RunAt: now,
-		CreatedAt: now,
+		RunAt:       now,
+		CreatedAt:   now,
 	}
 
 	if err := s.store.Insert(ctx, j); err != nil {

@@ -21,11 +21,11 @@ func New(svc *service.Service) *Handler {
 }
 
 type createJobRequest struct {
-	Type string `json:"type"`
+	Type    string          `json:"type"`
 	Payload json.RawMessage `json:"payload"`
 }
 
-func (h *Handler)createJob(c *gin.Context) {
+func (h *Handler) createJob(c *gin.Context) {
 	var req createJobRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "malformed JSON body"})
@@ -46,13 +46,13 @@ func (h *Handler)createJob(c *gin.Context) {
 	c.JSON(http.StatusAccepted, gin.H{"id": j.ID, "status": j.Status})
 }
 
-func (h *Handler) getJob( c*gin.Context) {
-	j, err := h.svc.Get(c.Request.Context(),c.Param("id"))
+func (h *Handler) getJob(c *gin.Context) {
+	j, err := h.svc.Get(c.Request.Context(), c.Param("id"))
 	if errors.Is(err, job.ErrNotFound) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "job not found"})
 		return
 	}
-		if err != nil {
+	if err != nil {
 		log.Printf("get job: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
