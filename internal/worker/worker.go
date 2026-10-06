@@ -37,7 +37,7 @@ func (w *Worker) Run(ctx context.Context) {
 			log.Printf("[worker %d] stopping: %v", w.id, err)
 			return
 		}
-		w.handle(ctx, id)
+		w.handle(context.WithoutCancel(ctx), id)
 	}
 }
 

@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
-	"sync"
 
+	"errors"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/anandhubiju-dev/jobqueue/internal/api"
@@ -19,13 +22,16 @@ import (
 
 func main() {
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
 		log.Fatal("DATABASE_URL is not set")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	st, err := store.New(ctx, dbURL)
+	dbCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	st, err := store.New(dbCtx, dbURL)
 	cancel()
 	if err != nil {
 		log.Fatal(err)
@@ -43,7 +49,7 @@ func main() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			w.Run(context.Background())
+			w.Run(ctx)
 		}()
 	}
 
@@ -54,7 +60,24 @@ func main() {
 	})
 	api.New(svc).Register(r)
 
-	if err := r.Run(":8080"); err != nil {
-		log.Fatalf("Failed to run the server : %v", err)
+	srv := &http.Server{Addr: ":8080", Handler: r}
+
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("http server: %v", err)
+			stop()
+		}
+	}()
+
+	<-ctx.Done()
+	log.Println("shutting down")
+
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelShutdown()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("http shutdown: %v", err)
 	}
+
+	wg.Wait()
+	log.Println("shutdown complete")
 }
