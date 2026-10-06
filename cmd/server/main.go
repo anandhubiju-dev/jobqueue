@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"sync"
 
 	"log"
 	"net/http"
@@ -34,8 +35,17 @@ func main() {
 	q := queue.NewInMemory(100)
 	svc := service.New(st, q)
 
-	w := worker.New(q, st)
-	go w.Run(context.Background())
+	const numWorkers = 4
+
+	var wg sync.WaitGroup
+	for i := 1; i <= numWorkers; i++ {
+		w := worker.New(i, q, st)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			w.Run(context.Background())
+		}()
+	}
 
 	r := gin.Default()
 
