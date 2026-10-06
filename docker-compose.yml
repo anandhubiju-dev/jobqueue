@@ -23,5 +23,17 @@ services:
       postgres:
         condition: service_healthy
 
+  test:
+    image: golang:1.27
+    working_dir: /src
+    volumes:
+      - .:/src
+    environment:
+      TEST_DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles: ["test"]
+
 volumes:
   pgdata:
