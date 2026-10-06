@@ -73,7 +73,7 @@ func (s *Store) MarkCompleted(ctx context.Context, id string, now time.Time) err
 
 func (s *Store) MarkFailed(ctx context.Context, id string, now time.Time, msg string) error {
 	_, err := s.pool.Exec(ctx,
-		`UPDATE jobs SET status = 'completed', completed_at = $2, error = $3 WHERE id = $1`,
+		`UPDATE jobs SET status = 'failed', completed_at = $2, error = $3 WHERE id = $1`,
 		id, now, msg)
 	if err != nil {
 		return fmt.Errorf("mark failed %s: %w", id, err)

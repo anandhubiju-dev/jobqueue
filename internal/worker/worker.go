@@ -9,6 +9,8 @@ import (
 	"github.com/anandhubiju-dev/jobqueue/internal/job"
 )
 
+const jobTimeout = 10 * time.Second
+
 type Queue interface {
 	Dequeue(ctx context.Context) (string, error)
 }
@@ -59,9 +61,12 @@ func (w *Worker) handle(ctx context.Context, id string) {
 
 	log.Printf("[worker %d] started job %s (%s)", w.id, j.ID, j.Type)
 
-	if err := process(ctx, j); err != nil {
+	jobCtx, cancel := context.WithTimeout(ctx, jobTimeout)
+	err = process(jobCtx, j)
+	cancel()
+	if err != nil {
 		log.Printf("[worker %d] job %s failed: %v", w.id, id, err)
-		_ = w.store.MarkFailed(ctx, id, time.Now(), err.Error())
+		w.fail(id, err)
 		return
 	}
 
@@ -71,4 +76,12 @@ func (w *Worker) handle(ctx context.Context, id string) {
 	}
 
 	log.Printf("[worker %d] finished job %s", w.id, id)
+}
+
+func (w *Worker) fail(id string, cause error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := w.store.MarkFailed(ctx, id, time.Now(), cause.Error()); err != nil {
+		log.Printf("[worker %d] mark failed %s: %v", w.id, id, err)
+	}
 }
