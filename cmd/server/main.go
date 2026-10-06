@@ -9,8 +9,10 @@ import (
 	"time"
 
 	"github.com/anandhubiju-dev/jobqueue/internal/api"
+	"github.com/anandhubiju-dev/jobqueue/internal/queue"
 	"github.com/anandhubiju-dev/jobqueue/internal/service"
 	"github.com/anandhubiju-dev/jobqueue/internal/store"
+	"github.com/anandhubiju-dev/jobqueue/internal/worker"
 	"github.com/gin-gonic/gin"
 )
 
@@ -29,7 +31,11 @@ func main() {
 	}
 	defer st.Close()
 
-	svc := service.New(st)
+	q := queue.NewInMemory(100)
+	svc := service.New(st, q)
+
+	w := worker.New(q, st)
+	go w.Run(context.Background())
 
 	r := gin.Default()
 

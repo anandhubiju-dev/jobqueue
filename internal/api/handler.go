@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/anandhubiju-dev/jobqueue/internal/job"
+	"github.com/anandhubiju-dev/jobqueue/internal/queue"
 	"github.com/anandhubiju-dev/jobqueue/internal/service"
 )
 
@@ -37,6 +38,12 @@ func (h *Handler) createJob(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+
+	if errors.Is(err, queue.ErrFull) {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "server busy, retry later"})
+		return
+	}
+
 	if err != nil {
 		log.Printf("create job: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})

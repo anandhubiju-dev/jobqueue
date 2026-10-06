@@ -16,12 +16,17 @@ type Store interface {
 	Get(ctx context.Context, id string) (*job.Job, error)
 }
 
-type Service struct {
-	store Store
+type Queue interface {
+	Enqueue(ctx context.Context, id string) error
 }
 
-func New(store Store) *Service {
-	return &Service{store: store}
+type Service struct {
+	store Store
+	queue Queue
+}
+
+func New(store Store, queue Queue) *Service {
+	return &Service{store: store, queue: queue}
 }
 
 var ErrInvalidJob = errors.New("invalid job")
@@ -53,6 +58,10 @@ func (s *Service) Create(ctx context.Context, jobType string, payload json.RawMe
 
 	if err := s.store.Insert(ctx, j); err != nil {
 		return nil, err
+	}
+
+	if err := s.queue.Enqueue(ctx, j.ID); err != nil {
+		return nil, fmt.Errorf("enqueue job %s: %w", j.ID, err)
 	}
 	return j, nil
 }
