@@ -80,3 +80,13 @@ func (s *Store) MarkFailed(ctx context.Context, id string, now time.Time, msg st
 	}
 	return nil
 }
+
+func (s *Store) MarkRetrying(ctx context.Context, id string, runAt time.Time, msg string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE jobs SET status = 'retrying', run_at = $2, error = $3 WHERE id = $1`,
+		id, runAt, msg)
+	if err != nil {
+		return fmt.Errorf("mark retrying %s: %w", id, err)
+	}
+	return nil
+}

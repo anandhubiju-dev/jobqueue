@@ -108,3 +108,31 @@ func TestMarkFailed(t *testing.T) {
 		t.Fatal("completed_at not set")
 	}
 }
+
+func TestMarkRetrying(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	id := insertTestJob(t, st)
+
+	if err := st.MarkProcessing(ctx, id, time.Now()); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	next := time.Now().Add(5 * time.Second)
+	if err := st.MarkRetrying(ctx, id, next, "timeout"); err != nil {
+		t.Fatalf("retrying: %v", err)
+	}
+
+	j, err := st.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if j.Status != job.StatusRetrying || j.Attempts != 1 {
+		t.Fatalf("status=%s attempts=%d", j.Status, j.Attempts)
+	}
+	if j.Error == nil || *j.Error != "timeout" {
+		t.Fatalf("error = %v", j.Error)
+	}
+	if j.RunAt.Sub(next).Abs() > time.Second {
+		t.Fatalf("run_at = %v, want about %v", j.RunAt, next)
+	}
+}
