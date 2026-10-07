@@ -13,6 +13,7 @@ const (
 	StatusProcessing Status = "processing"
 	StatusCompleted  Status = "completed"
 	StatusFailed     Status = "failed"
+	StatusRetrying   Status = "retrying"
 )
 
 type Job struct {
