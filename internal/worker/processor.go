@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -18,7 +19,7 @@ func process(ctx context.Context, j *job.Job) error {
 	case "notification":
 		d = 1 * time.Second
 	default:
-		return fmt.Errorf("no processor for type %q", j.Type)
+		return Permanent(fmt.Errorf("no processor for type %q", j.Type))
 	}
 
 	select {
@@ -27,4 +28,22 @@ func process(ctx context.Context, j *job.Job) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+type permanentError struct {
+	err error
+}
+
+func (e *permanentError) Error() string { return e.err.Error() }
+func (e *permanentError) Unwrap() error { return e.err }
+
+// Permanent marks err as not worth retrying
+func Permanent(err error) error {
+	return &permanentError{err: err}
+}
+
+// Ispermanent reports whether err, or anything it wraps, is marked permanent
+func IsPermanent(err error) bool {
+	var p *permanentError
+	return errors.As(err, &p)
 }

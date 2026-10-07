@@ -65,7 +65,7 @@ func (w *Worker) handle(ctx context.Context, id string) {
 	err = process(jobCtx, j)
 	cancel()
 	if err != nil {
-		log.Printf("[worker %d] job %s failed: %v", w.id, id, err)
+		log.Printf("[worker %d] job %s failed (permanent=%v) %v", w.id, id, IsPermanent(err), err)
 		w.fail(id, err)
 		return
 	}
