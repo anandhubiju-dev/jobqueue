@@ -64,7 +64,7 @@ func (s *Store) MarkProcessing(ctx context.Context, id string, now time.Time) er
 
 func (s *Store) MarkCompleted(ctx context.Context, id string, now time.Time) error {
 	_, err := s.pool.Exec(ctx,
-		`UPDATE jobs SET status = 'completed', completed_at = $2 WHERE id = $1`, id, now)
+		`UPDATE jobs SET status = 'completed', completed_at = $2, error = NULL WHERE id = $1`, id, now)
 	if err != nil {
 		return fmt.Errorf("mark completed %s: %w", id, err)
 	}
@@ -89,4 +89,36 @@ func (s *Store) MarkRetrying(ctx context.Context, id string, runAt time.Time, ms
 		return fmt.Errorf("mark retrying %s: %w", id, err)
 	}
 	return nil
+}
+
+const claimDueSQL = `
+UPDATE jobs SET status = 'queued'
+WHERE id IN (
+    SELECT id FROM jobs
+    WHERE status = 'retrying' AND run_at <= $1
+    ORDER BY run_at
+    LIMIT $2
+    FOR UPDATE SKIP LOCKED
+)
+RETURNING id`
+
+func (s *Store) ClaimDue(ctx context.Context, now time.Time, limit int) ([]string, error) {
+	rows, err := s.pool.Query(ctx, claimDueSQL, now, limit)
+	if err != nil {
+		return nil, fmt.Errorf("claim due: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan due id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("claim due: %w", err)
+	}
+	return ids, nil
 }

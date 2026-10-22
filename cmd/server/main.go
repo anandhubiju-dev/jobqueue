@@ -14,6 +14,7 @@ import (
 
 	"github.com/anandhubiju-dev/jobqueue/internal/api"
 	"github.com/anandhubiju-dev/jobqueue/internal/queue"
+	"github.com/anandhubiju-dev/jobqueue/internal/scheduler"
 	"github.com/anandhubiju-dev/jobqueue/internal/service"
 	"github.com/anandhubiju-dev/jobqueue/internal/store"
 	"github.com/anandhubiju-dev/jobqueue/internal/worker"
@@ -52,6 +53,13 @@ func main() {
 			w.Run(ctx)
 		}()
 	}
+
+	sched := scheduler.New(st, q, time.Second) // NEW
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		sched.Run(ctx)
+	}()
 
 	r := gin.Default()
 

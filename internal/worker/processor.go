@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -18,6 +19,17 @@ func process(ctx context.Context, j *job.Job) error {
 		d = 4 * time.Second
 	case "notification":
 		d = 1 * time.Second
+	case "flaky":
+		var p struct {
+			FailTimes int `json:"fail_times"`
+		}
+		if err := json.Unmarshal(j.Payload, &p); err != nil {
+			return Permanent(fmt.Errorf("bad flaky payload: %w", err))
+		}
+		if j.Attempts <= p.FailTimes {
+			return fmt.Errorf("simulated failure on attempt %d", j.Attempts)
+		}
+		d = 500 * time.Millisecond
 	default:
 		return Permanent(fmt.Errorf("no processor for type %q", j.Type))
 	}

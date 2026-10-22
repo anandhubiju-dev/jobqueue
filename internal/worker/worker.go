@@ -20,6 +20,7 @@ type Store interface {
 	MarkProcessing(ctx context.Context, id string, now time.Time) error
 	MarkCompleted(ctx context.Context, id string, now time.Time) error
 	MarkFailed(ctx context.Context, id string, now time.Time, msg string) error
+	MarkRetrying(ctx context.Context, id string, RunAt time.Time, msg string) error
 }
 
 type Worker struct {
@@ -65,8 +66,8 @@ func (w *Worker) handle(ctx context.Context, id string) {
 	err = process(jobCtx, j)
 	cancel()
 	if err != nil {
-		log.Printf("[worker %d] job %s failed (permanent=%v) %v", w.id, id, IsPermanent(err), err)
-		w.fail(id, err)
+		log.Printf("[worker %d] job %s failed (permanent=%v): %v", w.id, id, IsPermanent(err), err)
+		w.retryOrFail(j, err)
 		return
 	}
 
@@ -84,4 +85,21 @@ func (w *Worker) fail(id string, cause error) {
 	if err := w.store.MarkFailed(ctx, id, time.Now(), cause.Error()); err != nil {
 		log.Printf("[worker %d] mark failed %s: %v", w.id, id, err)
 	}
+}
+
+func (w *Worker) retryOrFail(j *job.Job, cause error) {
+	if IsPermanent(cause) || j.Attempts >= j.MaxAttempts {
+		w.fail(j.ID, cause)
+		return
+	}
+
+	delay := backoff(j.Attempts)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := w.store.MarkRetrying(ctx, j.ID, time.Now().Add(delay), cause.Error()); err != nil {
+		log.Printf("[worker %d] mark retrying %s: %v", w.id, j.ID, err)
+		return
+	}
+	log.Printf("[worker %d] job %s will retry in %v (attempt %d/%d)",
+		w.id, j.ID, delay.Round(time.Millisecond), j.Attempts, j.MaxAttempts)
 }

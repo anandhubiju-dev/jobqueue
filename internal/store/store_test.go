@@ -136,3 +136,51 @@ func TestMarkRetrying(t *testing.T) {
 		t.Fatalf("run_at = %v, want about %v", j.RunAt, next)
 	}
 }
+
+func TestClaimDue(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	due := insertTestJob(t, st)
+	later := insertTestJob(t, st)
+
+	for id, at := range map[string]time.Time{
+		due:   time.Now().Add(-time.Second),
+		later: time.Now().Add(time.Hour),
+	} {
+		if err := st.MarkProcessing(ctx, id, time.Now()); err != nil {
+			t.Fatalf("claim: %v", err)
+		}
+		if err := st.MarkRetrying(ctx, id, at, "x"); err != nil {
+			t.Fatalf("retrying: %v", err)
+		}
+	}
+
+	ids, err := st.ClaimDue(ctx, time.Now(), 100)
+	if err != nil {
+		t.Fatalf("claim due: %v", err)
+	}
+	found := false
+	for _, id := range ids {
+		if id == later {
+			t.Fatal("future job was claimed")
+		}
+		if id == due {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("due job was not claimed")
+	}
+
+	j, _ := st.Get(ctx, due)
+	if j.Status != job.StatusQueued {
+		t.Fatalf("status = %s, want queued", j.Status)
+	}
+
+	again, _ := st.ClaimDue(ctx, time.Now(), 100)
+	for _, id := range again {
+		if id == due {
+			t.Fatal("job claimed twice")
+		}
+	}
+}

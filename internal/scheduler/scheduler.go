@@ -1,0 +1,57 @@
+package scheduler
+
+import (
+	"context"
+	"log"
+	"time"
+)
+
+type Store interface {
+	ClaimDue(ctx context.Context, now time.Time, limit int) ([]string, error)
+	MarkRetrying(ctx context.Context, id string, RunAt time.Time, msg string) error
+}
+
+type Queue interface {
+	Enqueue(ctx context.Context, id string) error
+}
+
+type Scheduler struct {
+	store    Store
+	queue    Queue
+	interval time.Duration
+}
+
+func New(s Store, q Queue, interval time.Duration) *Scheduler {
+	return &Scheduler{store: s, queue: q, interval: interval}
+}
+
+func (s *Scheduler) Run(ctx context.Context) {
+	ticker := time.NewTicker(s.interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("[scheduler] stopping: %v", ctx.Err())
+			return
+		case <-ticker.C:
+			s.tick(ctx)
+		}
+	}
+}
+
+func (s *Scheduler) tick(ctx context.Context) {
+	ids, err := s.store.ClaimDue(ctx, time.Now(), 50)
+	if err != nil {
+		log.Printf("[scheduler] claim due: %v", err)
+		return
+	}
+	for _, id := range ids {
+		if err := s.queue.Enqueue(ctx, id); err != nil {
+			log.Printf("[scheduler] enqueue %s: %v, back to retrying", id, err)
+			_ = s.store.MarkRetrying(context.WithoutCancel(ctx), id, time.Now().Add(time.Second), "queue full")
+			continue
+		}
+		log.Printf("[scheduler] re-enqueued job %s", id)
+	}
+}
