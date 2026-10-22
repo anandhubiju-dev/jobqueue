@@ -184,3 +184,48 @@ func TestClaimDue(t *testing.T) {
 		}
 	}
 }
+
+func TestHeartbeat(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	id := insertTestJob(t, st)
+
+	claimedAt := time.Now()
+	if err := st.MarkProcessing(ctx, id, claimedAt); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+
+	readHB := func() time.Time {
+		var hb *time.Time
+		err := st.pool.QueryRow(ctx, "SELECT heartbeat_at FROM jobs WHERE id = $1", id).Scan(&hb)
+		if err != nil || hb == nil {
+			t.Fatalf("heartbeat_at = %v, err = %v", hb, err)
+		}
+		return *hb
+	}
+
+	if hb := readHB(); hb.Sub(claimedAt).Abs() > time.Second {
+		t.Fatalf("claim should set heartbeat, got %v", hb)
+	}
+
+	later := claimedAt.Add(time.Minute)
+	if err := st.Heartbeat(ctx, id, 1, later); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	if hb := readHB(); hb.Sub(later).Abs() > time.Second {
+		t.Fatalf("heartbeat not advanced, got %v", hb)
+	}
+
+	// wrong attempt number: a replaced worker must be rejected
+	if err := st.Heartbeat(ctx, id, 2, later); err != job.ErrNotOwner {
+		t.Fatalf("stale attempt: want ErrNotOwner, got %v", err)
+	}
+
+	// once the job is finished, nobody owns it
+	if err := st.MarkCompleted(ctx, id, time.Now()); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if err := st.Heartbeat(ctx, id, 1, later); err != job.ErrNotOwner {
+		t.Fatalf("after complete: want ErrNotOwner, got %v", err)
+	}
+}

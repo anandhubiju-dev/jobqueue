@@ -48,7 +48,7 @@ func (s *Store) Get(ctx context.Context, id string) (*job.Job, error) {
 
 const claimJobSQL = `
 UPDATE jobs
-SET status = 'processing', started_at = $2, attempts = attempts + 1
+SET status = 'processing', started_at = $2, heartbeat_at = $2, attempts = attempts + 1
 WHERE id = $1 AND status = 'queued'`
 
 func (s *Store) MarkProcessing(ctx context.Context, id string, now time.Time) error {
@@ -121,4 +121,18 @@ func (s *Store) ClaimDue(ctx context.Context, now time.Time, limit int) ([]strin
 		return nil, fmt.Errorf("claim due: %w", err)
 	}
 	return ids, nil
+}
+
+func (s *Store) Heartbeat(ctx context.Context, id string, attempt int, now time.Time) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE jobs SET heartbeat_at = $2
+		 WHERE id = $1 AND status = 'processing' AND attempts = $3`,
+		id, now, attempt)
+	if err != nil {
+		return fmt.Errorf("heartbeat %s: %w", id, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return job.ErrNotOwner
+	}
+	return nil
 }

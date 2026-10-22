@@ -32,3 +32,4 @@ type Job struct {
 
 var ErrNotFound = errors.New("job not found")
 var ErrNotClaimable = errors.New("job is not claimable")
+var ErrNotOwner = errors.New("job is no longer owned by this attempt")
