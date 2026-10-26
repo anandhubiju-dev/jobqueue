@@ -321,3 +321,26 @@ func TestFenceRejectsZombie(t *testing.T) {
 		t.Fatalf("owner complete: %v", err)
 	}
 }
+
+func TestRecordChargeIdempotent(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	id := insertTestJob(t, st)
+	t.Cleanup(func() {
+		_, _ = st.pool.Exec(context.Background(), "DELETE FROM charges WHERE job_id = $1", id)
+	})
+
+	created, err := st.RecordCharge(ctx, id, 500)
+	if err != nil || !created {
+		t.Fatalf("first charge: created=%v err=%v", created, err)
+	}
+	created, err = st.RecordCharge(ctx, id, 500)
+	if err != nil || created {
+		t.Fatalf("second charge: created=%v err=%v", created, err)
+	}
+
+	var n int
+	if err := st.pool.QueryRow(ctx, "SELECT count(*) FROM charges WHERE job_id = $1", id).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("charge rows = %d, err = %v", n, err)
+	}
+}

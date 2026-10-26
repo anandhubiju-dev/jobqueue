@@ -23,7 +23,7 @@ type Store interface {
 	MarkFailed(ctx context.Context, id string, attempt int, now time.Time, msg string) error
 	MarkRetrying(ctx context.Context, id string, attempt int, RunAt time.Time, msg string) error
 	Heartbeat(ctx context.Context, id string, attempt int, now time.Time) error
-	RecordCharge(ctx context.Context, jobID string, amountCents int) error
+	RecordCharge(ctx context.Context, jobID string, amountCents int) (bool, error)
 }
 
 type Worker struct {

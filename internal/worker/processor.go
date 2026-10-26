@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/anandhubiju-dev/jobqueue/internal/job"
@@ -38,8 +39,12 @@ func (w *Worker) process(ctx context.Context, j *job.Job) error {
 		if err := json.Unmarshal(j.Payload, &p); err != nil {
 			return Permanent(fmt.Errorf("bad payment payload: %w", err))
 		}
-		if err := w.store.RecordCharge(ctx, j.ID, p.AmountCents); err != nil {
+		created, err := w.store.RecordCharge(ctx, j.ID, p.AmountCents)
+		if err != nil {
 			return err
+		}
+		if !created {
+			log.Printf("[worker %d] job %s: charge already recorded, skipping", w.id, j.ID)
 		}
 		if p.FailAfterCharge && j.Attempts == 1 {
 			return fmt.Errorf("lost connection after charging")
