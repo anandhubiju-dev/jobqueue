@@ -371,3 +371,34 @@ func TestInsertIdempotencyKey(t *testing.T) {
 		t.Fatalf("GetByKey = %v, %v; want %s", got, err, first.ID)
 	}
 }
+
+func TestListOrphanedQueued(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	old := insertTestJob(t, st)
+	fresh := insertTestJob(t, st)
+
+	_, err := st.pool.Exec(ctx,
+		"UPDATE jobs SET created_at = now() - interval '1 minute' WHERE id = $1", old)
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	ids, err := st.ListOrphanedQueued(ctx, time.Now(), time.Now().Add(-10*time.Second), 1000)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	foundOld := false
+	for _, id := range ids {
+		if id == fresh {
+			t.Fatal("fresh job listed as orphan")
+		}
+		if id == old {
+			foundOld = true
+		}
+	}
+	if !foundOld {
+		t.Fatal("old queued job not listed")
+	}
+}

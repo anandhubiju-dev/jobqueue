@@ -152,6 +152,32 @@ func (s *Store) ClaimDue(ctx context.Context, now time.Time, limit int) ([]strin
 	return ids, nil
 }
 
+func (s *Store) ListOrphanedQueued(ctx context.Context, now time.Time, olderThan time.Time, limit int) ([]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id FROM jobs
+		 WHERE status = 'queued' AND run_at <= $1 AND created_at < $2
+		 ORDER BY created_at
+		 LIMIT $3`,
+		now, olderThan, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list orphaned queued: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan orphaned id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list orphaned queued: %w", err)
+	}
+	return ids, nil
+}
+
 func (s *Store) Heartbeat(ctx context.Context, id string, attempt int, now time.Time) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE jobs SET heartbeat_at = $2

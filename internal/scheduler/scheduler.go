@@ -10,6 +10,7 @@ type Store interface {
 	ClaimDue(ctx context.Context, now time.Time, limit int) ([]string, error)
 	Requeue(ctx context.Context, id string, runAt time.Time, msg string) error
 	ReclaimStale(ctx context.Context, now, retryAt, staleBefore time.Time, limit int) ([]string, error)
+	ListOrphanedQueued(ctx context.Context, now, olderThan time.Time, limit int) ([]string, error)
 }
 
 type Queue interface {
@@ -27,6 +28,7 @@ func New(s Store, q Queue, interval time.Duration) *Scheduler {
 }
 
 const staleAfter = 6 * time.Second // 3 missed heartbeats
+const orphanGrace = 10 * time.Second
 
 func (s *Scheduler) Run(ctx context.Context) {
 	ticker := time.NewTicker(s.interval)
@@ -52,6 +54,7 @@ func (s *Scheduler) tick(ctx context.Context) {
 	for _, id := range lost {
 		log.Printf("[scheduler] reclaimed stale job %s", id)
 	}
+
 	ids, err := s.store.ClaimDue(ctx, time.Now(), 50)
 	if err != nil {
 		log.Printf("[scheduler] claim due: %v", err)
@@ -64,5 +67,18 @@ func (s *Scheduler) tick(ctx context.Context) {
 			continue
 		}
 		log.Printf("[scheduler] re-enqueued job %s", id)
+	}
+
+	orphans, err := s.store.ListOrphanedQueued(ctx, time.Now(), time.Now().Add(-orphanGrace), 50)
+	if err != nil {
+		log.Printf("[scheduler] list orphaned: %v", err)
+		return
+	}
+	for _, id := range orphans {
+		if err := s.queue.Enqueue(ctx, id); err != nil {
+			log.Printf("[scheduler] enqueue orphan %s: %v", id, err)
+			break
+		}
+		log.Printf("[scheduler] re-enqueued orphaned job %s", id)
 	}
 }
