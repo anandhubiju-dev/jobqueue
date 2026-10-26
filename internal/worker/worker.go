@@ -19,9 +19,9 @@ type Queue interface {
 type Store interface {
 	Get(ctx context.Context, id string) (*job.Job, error)
 	MarkProcessing(ctx context.Context, id string, now time.Time) error
-	MarkCompleted(ctx context.Context, id string, now time.Time) error
-	MarkFailed(ctx context.Context, id string, now time.Time, msg string) error
-	MarkRetrying(ctx context.Context, id string, RunAt time.Time, msg string) error
+	MarkCompleted(ctx context.Context, id string, attempt int, now time.Time) error
+	MarkFailed(ctx context.Context, id string, attempt int, now time.Time, msg string) error
+	MarkRetrying(ctx context.Context, id string, attempt int, RunAt time.Time, msg string) error
 	Heartbeat(ctx context.Context, id string, attempt int, now time.Time) error
 }
 
@@ -81,7 +81,11 @@ func (w *Worker) handle(ctx context.Context, id string) {
 		return
 	}
 
-	if err := w.store.MarkCompleted(ctx, id, time.Now()); err != nil {
+	if err := w.store.MarkCompleted(ctx, id, j.Attempts, time.Now()); err != nil {
+		if errors.Is(err, job.ErrNotOwner) {
+			log.Printf("[worker %d] job %s was taken over; discarding my result", w.id, id)
+			return
+		}
 		log.Printf("[worker %d] complete job %s: %v", w.id, id, err)
 		return
 	}
@@ -89,24 +93,34 @@ func (w *Worker) handle(ctx context.Context, id string) {
 	log.Printf("[worker %d] finished job %s", w.id, id)
 }
 
-func (w *Worker) fail(id string, cause error) {
+func (w *Worker) fail(j *job.Job, cause error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := w.store.MarkFailed(ctx, id, time.Now(), cause.Error()); err != nil {
-		log.Printf("[worker %d] mark failed %s: %v", w.id, id, err)
+	err := w.store.MarkFailed(ctx, j.ID, j.Attempts, time.Now(), cause.Error())
+	if errors.Is(err, job.ErrNotOwner) {
+		log.Printf("[worker %d] job %s was taken over; discarding my failure", w.id, j.ID)
+		return
+	}
+	if err != nil {
+		log.Printf("[worker %d] mark failed %s: %v", w.id, j.ID, err)
 	}
 }
 
 func (w *Worker) retryOrFail(j *job.Job, cause error) {
 	if IsPermanent(cause) || j.Attempts >= j.MaxAttempts {
-		w.fail(j.ID, cause)
+		w.fail(j, cause)
 		return
 	}
 
 	delay := backoff(j.Attempts)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := w.store.MarkRetrying(ctx, j.ID, time.Now().Add(delay), cause.Error()); err != nil {
+	err := w.store.MarkRetrying(ctx, j.ID, j.Attempts, time.Now().Add(delay), cause.Error())
+	if errors.Is(err, job.ErrNotOwner) {
+		log.Printf("[worker %d] job %s was taken over; not scheduling a retry", w.id, j.ID)
+		return
+	}
+	if err != nil {
 		log.Printf("[worker %d] mark retrying %s: %v", w.id, j.ID, err)
 		return
 	}

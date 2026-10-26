@@ -62,31 +62,47 @@ func (s *Store) MarkProcessing(ctx context.Context, id string, now time.Time) er
 	return nil
 }
 
-func (s *Store) MarkCompleted(ctx context.Context, id string, now time.Time) error {
-	_, err := s.pool.Exec(ctx,
-		`UPDATE jobs SET status = 'completed', completed_at = $2, error = NULL WHERE id = $1`, id, now)
-	if err != nil {
-		return fmt.Errorf("mark completed %s: %w", id, err)
-	}
-	return nil
+func (s *Store) MarkCompleted(ctx context.Context, id string, attempt int, now time.Time) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE jobs SET status = 'completed', completed_at = $2, error = NULL
+		 WHERE id = $1 AND status = 'processing' AND attempts = $3`,
+		id, now, attempt)
+	return fencedResult("mark completed", id, tag.RowsAffected(), err)
 }
 
-func (s *Store) MarkFailed(ctx context.Context, id string, now time.Time, msg string) error {
-	_, err := s.pool.Exec(ctx,
-		`UPDATE jobs SET status = 'failed', completed_at = $2, error = $3 WHERE id = $1`,
-		id, now, msg)
-	if err != nil {
-		return fmt.Errorf("mark failed %s: %w", id, err)
-	}
-	return nil
+func (s *Store) MarkFailed(ctx context.Context, id string, attempt int, now time.Time, msg string) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE jobs SET status = 'failed', completed_at = $2, error = $3
+		 WHERE id = $1 AND status = 'processing' AND attempts = $4`,
+		id, now, msg, attempt)
+	return fencedResult("mark failed", id, tag.RowsAffected(), err)
 }
 
-func (s *Store) MarkRetrying(ctx context.Context, id string, runAt time.Time, msg string) error {
+func (s *Store) MarkRetrying(ctx context.Context, id string, attempt int, runAt time.Time, msg string) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE jobs SET status = 'retrying', run_at = $2, error = $3
+		 WHERE id = $1 AND status = 'processing' AND attempts = $4`,
+		id, runAt, msg, attempt)
+	return fencedResult("mark retrying", id, tag.RowsAffected(), err)
+}
+
+func (s *Store) Requeue(ctx context.Context, id string, runAt time.Time, msg string) error {
 	_, err := s.pool.Exec(ctx,
-		`UPDATE jobs SET status = 'retrying', run_at = $2, error = $3 WHERE id = $1`,
+		`UPDATE jobs SET status = 'retrying', run_at = $2, error = $3
+		 WHERE id = $1 AND status = 'queued'`,
 		id, runAt, msg)
 	if err != nil {
-		return fmt.Errorf("mark retrying %s: %w", id, err)
+		return fmt.Errorf("requeue %s: %w", id, err)
+	}
+	return nil
+}
+
+func fencedResult(op, id string, rows int64, err error) error {
+	if err != nil {
+		return fmt.Errorf("%s %s: %w", op, id, err)
+	}
+	if rows == 0 {
+		return job.ErrNotOwner
 	}
 	return nil
 }

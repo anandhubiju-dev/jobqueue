@@ -73,7 +73,7 @@ func TestLifecycle(t *testing.T) {
 	}
 
 	// complete
-	if err := st.MarkCompleted(ctx, id, time.Now()); err != nil {
+	if err := st.MarkCompleted(ctx, id, 1, time.Now()); err != nil {
 		t.Fatalf("complete: %v", err)
 	}
 	j, _ = st.Get(ctx, id)
@@ -90,7 +90,7 @@ func TestMarkFailed(t *testing.T) {
 	if err := st.MarkProcessing(ctx, id, time.Now()); err != nil {
 		t.Fatalf("claim: %v", err)
 	}
-	if err := st.MarkFailed(ctx, id, time.Now(), "boom"); err != nil {
+	if err := st.MarkFailed(ctx, id, 1, time.Now(), "boom"); err != nil {
 		t.Fatalf("fail: %v", err)
 	}
 
@@ -118,7 +118,7 @@ func TestMarkRetrying(t *testing.T) {
 		t.Fatalf("claim: %v", err)
 	}
 	next := time.Now().Add(5 * time.Second)
-	if err := st.MarkRetrying(ctx, id, next, "timeout"); err != nil {
+	if err := st.MarkRetrying(ctx, id, 1, next, "timeout"); err != nil {
 		t.Fatalf("retrying: %v", err)
 	}
 
@@ -150,7 +150,7 @@ func TestClaimDue(t *testing.T) {
 		if err := st.MarkProcessing(ctx, id, time.Now()); err != nil {
 			t.Fatalf("claim: %v", err)
 		}
-		if err := st.MarkRetrying(ctx, id, at, "x"); err != nil {
+		if err := st.MarkRetrying(ctx, id, 1, at, "x"); err != nil {
 			t.Fatalf("retrying: %v", err)
 		}
 	}
@@ -222,7 +222,7 @@ func TestHeartbeat(t *testing.T) {
 	}
 
 	// once the job is finished, nobody owns it
-	if err := st.MarkCompleted(ctx, id, time.Now()); err != nil {
+	if err := st.MarkCompleted(ctx, id, 1, time.Now()); err != nil {
 		t.Fatalf("complete: %v", err)
 	}
 	if err := st.Heartbeat(ctx, id, 1, later); err != job.ErrNotOwner {
@@ -280,5 +280,44 @@ func TestReclaimStale(t *testing.T) {
 		if id == fresh {
 			t.Fatal("fresh job was reclaimed")
 		}
+	}
+}
+
+func TestFenceRejectsZombie(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	id := insertTestJob(t, st)
+
+	// attempt 1 starts, then is "lost" and reclaimed
+	if err := st.MarkProcessing(ctx, id, time.Now()); err != nil {
+		t.Fatalf("claim 1: %v", err)
+	}
+	if err := st.MarkRetrying(ctx, id, 1, time.Now(), "lost"); err != nil {
+		t.Fatalf("retrying: %v", err)
+	}
+	if _, err := st.ClaimDue(ctx, time.Now(), 100); err != nil {
+		t.Fatalf("claim due: %v", err)
+	}
+	// attempt 2 starts
+	if err := st.MarkProcessing(ctx, id, time.Now()); err != nil {
+		t.Fatalf("claim 2: %v", err)
+	}
+
+	// the zombie from attempt 1 wakes up and tries to finish
+	if err := st.MarkCompleted(ctx, id, 1, time.Now()); err != job.ErrNotOwner {
+		t.Fatalf("zombie complete: want ErrNotOwner, got %v", err)
+	}
+	if err := st.MarkFailed(ctx, id, 1, time.Now(), "x"); err != job.ErrNotOwner {
+		t.Fatalf("zombie fail: want ErrNotOwner, got %v", err)
+	}
+
+	j, _ := st.Get(ctx, id)
+	if j.Status != job.StatusProcessing || j.Attempts != 2 {
+		t.Fatalf("live attempt was disturbed: status=%s attempts=%d", j.Status, j.Attempts)
+	}
+
+	// the real owner can still finish
+	if err := st.MarkCompleted(ctx, id, 2, time.Now()); err != nil {
+		t.Fatalf("owner complete: %v", err)
 	}
 }

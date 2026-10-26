@@ -8,7 +8,7 @@ import (
 
 type Store interface {
 	ClaimDue(ctx context.Context, now time.Time, limit int) ([]string, error)
-	MarkRetrying(ctx context.Context, id string, RunAt time.Time, msg string) error
+	Requeue(ctx context.Context, id string, runAt time.Time, msg string) error
 	ReclaimStale(ctx context.Context, now, retryAt, staleBefore time.Time, limit int) ([]string, error)
 }
 
@@ -60,7 +60,7 @@ func (s *Scheduler) tick(ctx context.Context) {
 	for _, id := range ids {
 		if err := s.queue.Enqueue(ctx, id); err != nil {
 			log.Printf("[scheduler] enqueue %s: %v, back to retrying", id, err)
-			_ = s.store.MarkRetrying(context.WithoutCancel(ctx), id, time.Now().Add(time.Second), "queue full")
+			_ = s.store.Requeue(context.WithoutCancel(ctx), id, time.Now().Add(time.Second), "queue full")
 			continue
 		}
 		log.Printf("[scheduler] re-enqueued job %s", id)
