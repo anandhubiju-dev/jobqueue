@@ -36,6 +36,7 @@ var validTypes = map[string]bool{
 	"report":       true,
 	"notification": true,
 	"flaky":        true,
+	"payment":      true,
 }
 
 func (s *Service) Create(ctx context.Context, jobType string, payload json.RawMessage) (*job.Job, error) {

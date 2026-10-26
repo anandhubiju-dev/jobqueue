@@ -10,7 +10,7 @@ import (
 	"github.com/anandhubiju-dev/jobqueue/internal/job"
 )
 
-func process(ctx context.Context, j *job.Job) error {
+func (w *Worker) process(ctx context.Context, j *job.Job) error {
 	var d time.Duration
 	switch j.Type {
 	case "email":
@@ -28,6 +28,21 @@ func process(ctx context.Context, j *job.Job) error {
 		}
 		if j.Attempts <= p.FailTimes {
 			return fmt.Errorf("simulated failure on attempt %d", j.Attempts)
+		}
+		d = 500 * time.Millisecond
+	case "payment":
+		var p struct {
+			AmountCents     int  `json:"amount_cents"`
+			FailAfterCharge bool `json:"fail_after_charge"`
+		}
+		if err := json.Unmarshal(j.Payload, &p); err != nil {
+			return Permanent(fmt.Errorf("bad payment payload: %w", err))
+		}
+		if err := w.store.RecordCharge(ctx, j.ID, p.AmountCents); err != nil {
+			return err
+		}
+		if p.FailAfterCharge && j.Attempts == 1 {
+			return fmt.Errorf("lost connection after charging")
 		}
 		d = 500 * time.Millisecond
 	default:

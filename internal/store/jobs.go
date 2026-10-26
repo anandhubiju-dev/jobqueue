@@ -188,3 +188,13 @@ func (s *Store) ReclaimStale(ctx context.Context, now time.Time, retryAt time.Ti
 	}
 	return ids, nil
 }
+
+func (s *Store) RecordCharge(ctx context.Context, jobID string, amountCents int) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO charges (job_id, amount_cents) VALUES ($1, $2)`,
+		jobID, amountCents)
+	if err != nil {
+		return fmt.Errorf("record charge %s: %w", jobID, err)
+	}
+	return nil
+}

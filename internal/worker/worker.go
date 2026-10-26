@@ -23,6 +23,7 @@ type Store interface {
 	MarkFailed(ctx context.Context, id string, attempt int, now time.Time, msg string) error
 	MarkRetrying(ctx context.Context, id string, attempt int, RunAt time.Time, msg string) error
 	Heartbeat(ctx context.Context, id string, attempt int, now time.Time) error
+	RecordCharge(ctx context.Context, jobID string, amountCents int) error
 }
 
 type Worker struct {
@@ -72,7 +73,7 @@ func (w *Worker) handle(ctx context.Context, id string) {
 		w.heartbeat(jobCtx, cancel, id, j.Attempts)
 	}()
 
-	err = process(jobCtx, j)
+	err = w.process(jobCtx, j)
 	cancel()
 	<-hbDone
 	if err != nil {
