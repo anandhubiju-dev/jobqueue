@@ -136,3 +136,39 @@ func (s *Store) Heartbeat(ctx context.Context, id string, attempt int, now time.
 	}
 	return nil
 }
+
+const reclaimStaleSQL = `
+UPDATE jobs
+SET status = CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'retrying' END,
+    run_at = $2,
+    completed_at = CASE WHEN attempts >= max_attempts THEN $1::timestamptz ELSE NULL END,
+    error = 'worker lost (heartbeat stale)'
+WHERE id IN (
+    SELECT id FROM jobs
+    WHERE status = 'processing' AND heartbeat_at < $3
+    ORDER BY heartbeat_at
+    LIMIT $4
+    FOR UPDATE SKIP LOCKED
+)
+RETURNING id`
+
+func (s *Store) ReclaimStale(ctx context.Context, now time.Time, retryAt time.Time, staleBefore time.Time, limit int) ([]string, error) {
+	rows, err := s.pool.Query(ctx, reclaimStaleSQL, now, retryAt, staleBefore, limit)
+	if err != nil {
+		return nil, fmt.Errorf("reclaim stale: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan stale id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reclaim stale: %w", err)
+	}
+	return ids, nil
+}

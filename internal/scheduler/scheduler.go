@@ -9,6 +9,7 @@ import (
 type Store interface {
 	ClaimDue(ctx context.Context, now time.Time, limit int) ([]string, error)
 	MarkRetrying(ctx context.Context, id string, RunAt time.Time, msg string) error
+	ReclaimStale(ctx context.Context, now, retryAt, staleBefore time.Time, limit int) ([]string, error)
 }
 
 type Queue interface {
@@ -24,6 +25,8 @@ type Scheduler struct {
 func New(s Store, q Queue, interval time.Duration) *Scheduler {
 	return &Scheduler{store: s, queue: q, interval: interval}
 }
+
+const staleAfter = 6 * time.Second // 3 missed heartbeats
 
 func (s *Scheduler) Run(ctx context.Context) {
 	ticker := time.NewTicker(s.interval)
@@ -41,6 +44,14 @@ func (s *Scheduler) Run(ctx context.Context) {
 }
 
 func (s *Scheduler) tick(ctx context.Context) {
+	now := time.Now()
+	lost, err := s.store.ReclaimStale(ctx, now, now, now.Add(-staleAfter), 50)
+	if err != nil {
+		log.Printf("[scheduler] reclaim stale: %v", err)
+	}
+	for _, id := range lost {
+		log.Printf("[scheduler] reclaimed stale job %s", id)
+	}
 	ids, err := s.store.ClaimDue(ctx, time.Now(), 50)
 	if err != nil {
 		log.Printf("[scheduler] claim due: %v", err)

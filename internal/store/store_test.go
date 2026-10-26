@@ -229,3 +229,56 @@ func TestHeartbeat(t *testing.T) {
 		t.Fatalf("after complete: want ErrNotOwner, got %v", err)
 	}
 }
+
+func TestReclaimStale(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	retryable := insertTestJob(t, st)
+	exhausted := insertTestJob(t, st)
+
+	for _, id := range []string{retryable, exhausted} {
+		if err := st.MarkProcessing(ctx, id, time.Now()); err != nil {
+			t.Fatalf("claim: %v", err)
+		}
+	}
+	// make 'exhausted' have used all its attempts
+	_, err := st.pool.Exec(ctx, "UPDATE jobs SET attempts = max_attempts WHERE id = $1", exhausted)
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	now := time.Now()
+	ids, err := st.ReclaimStale(ctx, now, now, now.Add(time.Minute), 100)
+	if err != nil {
+		t.Fatalf("reclaim: %v", err)
+	}
+	got := map[string]bool{}
+	for _, id := range ids {
+		got[id] = true
+	}
+	if !got[retryable] || !got[exhausted] {
+		t.Fatalf("expected both reclaimed, got %v", ids)
+	}
+
+	j, _ := st.Get(ctx, retryable)
+	if j.Status != job.StatusRetrying || j.Error == nil {
+		t.Fatalf("retryable: status=%s error=%v", j.Status, j.Error)
+	}
+	j, _ = st.Get(ctx, exhausted)
+	if j.Status != job.StatusFailed || j.CompletedAt == nil {
+		t.Fatalf("exhausted: status=%s completedAt=%v", j.Status, j.CompletedAt)
+	}
+
+	// a job with a fresh heartbeat must be left alone
+	fresh := insertTestJob(t, st)
+	if err := st.MarkProcessing(ctx, fresh, time.Now()); err != nil {
+		t.Fatalf("claim fresh: %v", err)
+	}
+	ids, _ = st.ReclaimStale(ctx, now, now, now.Add(-time.Minute), 100)
+	for _, id := range ids {
+		if id == fresh {
+			t.Fatal("fresh job was reclaimed")
+		}
+	}
+}
