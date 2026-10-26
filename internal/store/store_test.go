@@ -41,7 +41,7 @@ func insertTestJob(t *testing.T, st *Store) string {
 		RunAt:       now,
 		CreatedAt:   now,
 	}
-	if err := st.Insert(context.Background(), j); err != nil {
+	if _, err := st.Insert(context.Background(), j); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 	t.Cleanup(func() {
@@ -342,5 +342,32 @@ func TestRecordChargeIdempotent(t *testing.T) {
 	var n int
 	if err := st.pool.QueryRow(ctx, "SELECT count(*) FROM charges WHERE job_id = $1", id).Scan(&n); err != nil || n != 1 {
 		t.Fatalf("charge rows = %d, err = %v", n, err)
+	}
+}
+
+func TestInsertIdempotencyKey(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	key := uuid.NewString()
+
+	mk := func() *job.Job {
+		now := time.Now()
+		return &job.Job{ID: uuid.NewString(), Type: "email", Payload: json.RawMessage(`{}`),
+			Status: job.StatusQueued, MaxAttempts: 3, RunAt: now, CreatedAt: now, IdempotencyKey: &key}
+	}
+	first, second := mk(), mk()
+	t.Cleanup(func() {
+		_, _ = st.pool.Exec(context.Background(), "DELETE FROM jobs WHERE idempotency_key = $1", key)
+	})
+
+	if created, err := st.Insert(ctx, first); err != nil || !created {
+		t.Fatalf("first: created=%v err=%v", created, err)
+	}
+	if created, err := st.Insert(ctx, second); err != nil || created {
+		t.Fatalf("second: created=%v err=%v", created, err)
+	}
+	got, err := st.GetByKey(ctx, key)
+	if err != nil || got.ID != first.ID {
+		t.Fatalf("GetByKey = %v, %v; want %s", got, err, first.ID)
 	}
 }

@@ -12,10 +12,10 @@ import (
 )
 
 type Store interface {
-	Insert(ctx context.Context, j *job.Job) error
+	Insert(ctx context.Context, j *job.Job) (bool, error)
 	Get(ctx context.Context, id string) (*job.Job, error)
+	GetByKey(ctx context.Context, key string) (*job.Job, error)
 }
-
 type Queue interface {
 	Enqueue(ctx context.Context, id string) error
 }
@@ -39,7 +39,7 @@ var validTypes = map[string]bool{
 	"payment":      true,
 }
 
-func (s *Service) Create(ctx context.Context, jobType string, payload json.RawMessage) (*job.Job, error) {
+func (s *Service) Create(ctx context.Context, jobType string, payload json.RawMessage, key string) (*job.Job, error) {
 	if !validTypes[jobType] {
 		return nil, fmt.Errorf("%w: unknown type %q", ErrInvalidJob, jobType)
 	}
@@ -58,8 +58,16 @@ func (s *Service) Create(ctx context.Context, jobType string, payload json.RawMe
 		CreatedAt:   now,
 	}
 
-	if err := s.store.Insert(ctx, j); err != nil {
+	if key != "" {
+		j.IdempotencyKey = &key
+	}
+
+	created, err := s.store.Insert(ctx, j)
+	if err != nil {
 		return nil, err
+	}
+	if !created {
+		return s.store.GetByKey(ctx, key)
 	}
 
 	if err := s.queue.Enqueue(ctx, j.ID); err != nil {

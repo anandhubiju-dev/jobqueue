@@ -11,18 +11,31 @@ import (
 )
 
 const insertJobSQL = `
-INSERT INTO jobs (id, type, payload, status, attempts, max_attempts, run_at, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
+INSERT INTO jobs (id, type, payload, status, attempts, max_attempts, run_at, created_at, idempotency_key)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`
 
-func (s *Store) Insert(ctx context.Context, j *job.Job) error {
-	_, err := s.pool.Exec(ctx, insertJobSQL,
+func (s *Store) Insert(ctx context.Context, j *job.Job) (created bool, err error) {
+	tag, err := s.pool.Exec(ctx, insertJobSQL,
 		j.ID, j.Type, j.Payload, j.Status,
-		j.Attempts, j.MaxAttempts, j.RunAt, j.CreatedAt,
+		j.Attempts, j.MaxAttempts, j.RunAt, j.CreatedAt, j.IdempotencyKey,
 	)
 	if err != nil {
-		return fmt.Errorf("insert job %s: %w", j.ID, err)
+		return false, fmt.Errorf("insert job %s: %w", j.ID, err)
 	}
-	return nil
+	return tag.RowsAffected() == 1, nil
+}
+
+func (s *Store) GetByKey(ctx context.Context, key string) (*job.Job, error) {
+	var id string
+	err := s.pool.QueryRow(ctx, `SELECT id FROM jobs WHERE idempotency_key = $1`, key).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, job.ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get by key: %w", err)
+	}
+	return s.Get(ctx, id)
 }
 
 const getJobSQL = `

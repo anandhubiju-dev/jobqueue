@@ -33,7 +33,8 @@ func (h *Handler) createJob(c *gin.Context) {
 		return
 	}
 
-	j, err := h.svc.Create(c.Request.Context(), req.Type, req.Payload)
+	key := c.GetHeader("Idempotency-Key")
+	j, err := h.svc.Create(c.Request.Context(), req.Type, req.Payload, key)
 	if errors.Is(err, service.ErrInvalidJob) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return

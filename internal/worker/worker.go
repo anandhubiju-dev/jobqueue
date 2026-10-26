@@ -17,7 +17,9 @@ type Queue interface {
 }
 
 type Store interface {
+	Insert(ctx context.Context, j *job.Job) (bool, error)
 	Get(ctx context.Context, id string) (*job.Job, error)
+	GetByKey(ctx context.Context, key string) (*job.Job, error)
 	MarkProcessing(ctx context.Context, id string, now time.Time) error
 	MarkCompleted(ctx context.Context, id string, attempt int, now time.Time) error
 	MarkFailed(ctx context.Context, id string, attempt int, now time.Time, msg string) error
