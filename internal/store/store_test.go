@@ -402,3 +402,43 @@ func TestListOrphanedQueued(t *testing.T) {
 		t.Fatal("old queued job not listed")
 	}
 }
+
+func TestListDueQueued(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	due := insertTestJob(t, st)
+	future := insertTestJob(t, st)
+	immediate := insertTestJob(t, st)
+
+	_, err := st.pool.Exec(ctx,
+		"UPDATE jobs SET created_at = now() - interval '1 minute', run_at = now() - interval '1 second' WHERE id = $1", due)
+	if err != nil {
+		t.Fatalf("setup due: %v", err)
+	}
+	_, err = st.pool.Exec(ctx,
+		"UPDATE jobs SET run_at = now() + interval '1 hour' WHERE id = $1", future)
+	if err != nil {
+		t.Fatalf("setup future: %v", err)
+	}
+
+	ids, err := st.ListDueQueued(ctx, time.Now(), 1000)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	foundDue := false
+	for _, id := range ids {
+		if id == future {
+			t.Fatal("future job listed early")
+		}
+		if id == immediate {
+			t.Fatal("immediate job listed as scheduled")
+		}
+		if id == due {
+			foundDue = true
+		}
+	}
+	if !foundDue {
+		t.Fatal("due scheduled job not listed")
+	}
+}

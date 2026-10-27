@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -22,8 +23,10 @@ func New(svc *service.Service) *Handler {
 }
 
 type createJobRequest struct {
-	Type    string          `json:"type"`
-	Payload json.RawMessage `json:"payload"`
+	Type         string          `json:"type"`
+	Payload      json.RawMessage `json:"payload"`
+	DelaySeconds *int            `json:"delay_seconds"`
+	RunAt        *time.Time      `json:"run_at"`
 }
 
 func (h *Handler) createJob(c *gin.Context) {
@@ -33,8 +36,26 @@ func (h *Handler) createJob(c *gin.Context) {
 		return
 	}
 
+	if req.DelaySeconds != nil && req.RunAt != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "use either delay_seconds or run_at, not both"})
+		return
+	}
+
+	runAt := time.Now()
+	switch {
+	case req.DelaySeconds != nil:
+		d := *req.DelaySeconds
+		if d < 0 || d > 365*24*3600 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "delay_seconds must be between 0 and 31536000"})
+			return
+		}
+		runAt = runAt.Add(time.Duration(d) * time.Second)
+	case req.RunAt != nil:
+		runAt = *req.RunAt
+	}
+
 	key := c.GetHeader("Idempotency-Key")
-	j, err := h.svc.Create(c.Request.Context(), req.Type, req.Payload, key)
+	j, err := h.svc.Create(c.Request.Context(), req.Type, req.Payload, key, runAt)
 	if errors.Is(err, service.ErrInvalidJob) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return

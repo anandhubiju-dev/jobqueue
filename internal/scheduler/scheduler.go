@@ -11,6 +11,7 @@ type Store interface {
 	Requeue(ctx context.Context, id string, runAt time.Time, msg string) error
 	ReclaimStale(ctx context.Context, now, retryAt, staleBefore time.Time, limit int) ([]string, error)
 	ListOrphanedQueued(ctx context.Context, now, olderThan time.Time, limit int) ([]string, error)
+	ListDueQueued(ctx context.Context, now time.Time, limit int) ([]string, error)
 }
 
 type Queue interface {
@@ -53,6 +54,18 @@ func (s *Scheduler) tick(ctx context.Context) {
 	}
 	for _, id := range lost {
 		log.Printf("[scheduler] reclaimed stale job %s", id)
+	}
+
+	scheduled, err := s.store.ListDueQueued(ctx, time.Now(), 50)
+	if err != nil {
+		log.Printf("[scheduler] list due scheduled: %v", err)
+	}
+	for _, id := range scheduled {
+		if err := s.queue.Enqueue(ctx, id); err != nil {
+			log.Printf("[scheduler] enqueue scheduled %s: %v", id, err)
+			break
+		}
+		log.Printf("[scheduler] enqueued scheduled job %s", id)
 	}
 
 	ids, err := s.store.ClaimDue(ctx, time.Now(), 50)

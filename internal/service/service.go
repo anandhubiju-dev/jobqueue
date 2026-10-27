@@ -31,6 +31,8 @@ func New(store Store, queue Queue) *Service {
 
 var ErrInvalidJob = errors.New("invalid job")
 
+const maxScheduleAhead = 365 * 24 * time.Hour
+
 var validTypes = map[string]bool{
 	"email":        true,
 	"report":       true,
@@ -39,7 +41,7 @@ var validTypes = map[string]bool{
 	"payment":      true,
 }
 
-func (s *Service) Create(ctx context.Context, jobType string, payload json.RawMessage, key string) (*job.Job, error) {
+func (s *Service) Create(ctx context.Context, jobType string, payload json.RawMessage, key string, runAt time.Time) (*job.Job, error) {
 	if !validTypes[jobType] {
 		return nil, fmt.Errorf("%w: unknown type %q", ErrInvalidJob, jobType)
 	}
@@ -48,13 +50,20 @@ func (s *Service) Create(ctx context.Context, jobType string, payload json.RawMe
 	}
 
 	now := time.Now()
+	if runAt.IsZero() || runAt.Before(now) {
+		runAt = now // past or unset means run immediately
+	}
+	if runAt.After(now.Add(maxScheduleAhead)) {
+		return nil, fmt.Errorf("%w: run_at is more than a year ahead", ErrInvalidJob)
+	}
+
 	j := &job.Job{
 		ID:          uuid.NewString(),
 		Type:        jobType,
 		Payload:     payload,
 		Status:      job.StatusQueued,
 		MaxAttempts: 3,
-		RunAt:       now,
+		RunAt:       runAt, // was "now"
 		CreatedAt:   now,
 	}
 
@@ -68,6 +77,10 @@ func (s *Service) Create(ctx context.Context, jobType string, payload json.RawMe
 	}
 	if !created {
 		return s.store.GetByKey(ctx, key)
+	}
+
+	if j.RunAt.After(now) {
+		return j, nil // scheduled for later: the scheduler enqueues it when due
 	}
 
 	if err := s.queue.Enqueue(ctx, j.ID); err != nil {
