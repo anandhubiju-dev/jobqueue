@@ -39,7 +39,21 @@ func main() {
 	}
 	defer st.Close()
 
-	q := queue.NewInMemory(100)
+	var q queue.Queue
+	switch os.Getenv("QUEUE") {
+	case "redis":
+		rq, err := queue.NewRedis(context.Background(), os.Getenv("REDIS_URL"), 100)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer rq.Close()
+		q = rq
+		log.Println("using redis queue")
+	default:
+		q = queue.NewInMemory(100)
+		log.Println("using in-memory queue")
+	}
+
 	svc := service.New(st, q)
 
 	const numWorkers = 4
