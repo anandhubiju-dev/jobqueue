@@ -22,6 +22,9 @@ import (
 )
 
 func main() {
+	if host, err := os.Hostname(); err == nil {
+		log.SetPrefix("[" + host + "] ")
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

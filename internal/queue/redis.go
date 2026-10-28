@@ -14,6 +14,7 @@ const redisKey = "jobqueue:ids"
 type Redis struct {
 	client  *redis.Client
 	maxSize int64
+	key     string
 }
 
 func NewRedis(ctx context.Context, url string, maxSize int) (*Redis, error) {
@@ -26,20 +27,20 @@ func NewRedis(ctx context.Context, url string, maxSize int) (*Redis, error) {
 		client.Close()
 		return nil, fmt.Errorf("ping redis: %w", err)
 	}
-	return &Redis{client: client, maxSize: int64(maxSize)}, nil
+	return &Redis{client: client, maxSize: int64(maxSize), key: redisKey}, nil
 }
 
 func (q *Redis) Close() error { return q.client.Close() }
 
 func (q *Redis) Enqueue(ctx context.Context, id string) error {
-	n, err := q.client.LLen(ctx, redisKey).Result()
+	n, err := q.client.LLen(ctx, q.key).Result()
 	if err != nil {
 		return fmt.Errorf("redis llen: %w", err)
 	}
 	if n >= q.maxSize {
 		return ErrFull
 	}
-	if err := q.client.LPush(ctx, redisKey, id).Err(); err != nil {
+	if err := q.client.LPush(ctx, q.key, id).Err(); err != nil {
 		return fmt.Errorf("redis lpush: %w", err)
 	}
 	return nil
@@ -50,7 +51,7 @@ func (q *Redis) Dequeue(ctx context.Context) (string, error) {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		res, err := q.client.BRPop(ctx, time.Second, redisKey).Result()
+		res, err := q.client.BRPop(ctx, time.Second, q.key).Result()
 		if errors.Is(err, redis.Nil) {
 			continue // timed out with nothing to do; loop and re-check ctx
 		}
