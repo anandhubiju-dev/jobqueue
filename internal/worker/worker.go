@@ -3,7 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/anandhubiju-dev/jobqueue/internal/job"
@@ -38,11 +38,15 @@ func New(id int, q Queue, s Store) *Worker {
 	return &Worker{id: id, queue: q, store: s}
 }
 
+func (w *Worker) log() *slog.Logger {
+	return slog.With("worker", w.id)
+}
+
 func (w *Worker) Run(ctx context.Context) {
 	for {
 		id, err := w.queue.Dequeue(ctx)
 		if err != nil {
-			log.Printf("[worker %d] stopping: %v", w.id, err)
+			w.log().Info("worker stopping", "reason", err)
 			return
 		}
 		w.handle(context.WithoutCancel(ctx), id)
@@ -52,20 +56,20 @@ func (w *Worker) Run(ctx context.Context) {
 func (w *Worker) handle(ctx context.Context, id string) {
 	if err := w.store.MarkProcessing(ctx, id, time.Now()); err != nil {
 		if errors.Is(err, job.ErrNotClaimable) {
-			log.Printf("[worker %d] job %s already claimed, skipping", w.id, id)
+			w.log().Info("job already claimed, skipping", "job_id", id)
 			return
 		}
-		log.Printf("[worker %d] claim job %s: %v", w.id, id, err)
+		w.log().Error("claim job failed", "job_id", id, "err", err)
 		return
 	}
 
 	j, err := w.store.Get(ctx, id)
 	if err != nil {
-		log.Printf("[worker %d] load job %s: %v", w.id, id, err)
+		w.log().Error("load job failed", "job_id", id, "err", err)
 		return
 	}
 
-	log.Printf("[worker %d] started job %s (%s)", w.id, j.ID, j.Type)
+	w.log().Info("job started", "job_id", j.ID, "type", j.Type, "attempt", j.Attempts)
 
 	jobCtx, cancel := context.WithTimeout(ctx, jobTimeout)
 
@@ -79,21 +83,21 @@ func (w *Worker) handle(ctx context.Context, id string) {
 	cancel()
 	<-hbDone
 	if err != nil {
-		log.Printf("[worker %d] job %s failed (permanent=%v): %v", w.id, id, IsPermanent(err), err)
+		w.log().Warn("job failed", "job_id", id, "permanent", IsPermanent(err), "err", err)
 		w.retryOrFail(j, err)
 		return
 	}
 
 	if err := w.store.MarkCompleted(ctx, id, j.Attempts, time.Now()); err != nil {
 		if errors.Is(err, job.ErrNotOwner) {
-			log.Printf("[worker %d] job %s was taken over; discarding my result", w.id, id)
+			w.log().Info("job taken over; discarding result", "job_id", id)
 			return
 		}
-		log.Printf("[worker %d] complete job %s: %v", w.id, id, err)
+		w.log().Error("complete job failed", "job_id", id, "err", err)
 		return
 	}
 
-	log.Printf("[worker %d] finished job %s", w.id, id)
+	w.log().Info("job finished", "job_id", id, "attempt", j.Attempts)
 }
 
 func (w *Worker) fail(j *job.Job, cause error) {
@@ -101,11 +105,11 @@ func (w *Worker) fail(j *job.Job, cause error) {
 	defer cancel()
 	err := w.store.MarkFailed(ctx, j.ID, j.Attempts, time.Now(), cause.Error())
 	if errors.Is(err, job.ErrNotOwner) {
-		log.Printf("[worker %d] job %s was taken over; discarding my failure", w.id, j.ID)
+		w.log().Info("job taken over; discarding failure", "job_id", j.ID)
 		return
 	}
 	if err != nil {
-		log.Printf("[worker %d] mark failed %s: %v", w.id, j.ID, err)
+		w.log().Error("mark failed over", "job_id", j.ID, "err", err)
 	}
 }
 
@@ -120,15 +124,15 @@ func (w *Worker) retryOrFail(j *job.Job, cause error) {
 	defer cancel()
 	err := w.store.MarkRetrying(ctx, j.ID, j.Attempts, time.Now().Add(delay), cause.Error())
 	if errors.Is(err, job.ErrNotOwner) {
-		log.Printf("[worker %d] job %s was taken over; not scheduling a retry", w.id, j.ID)
+		w.log().Info("job was taken over; not scheduling retry", "job_id", j.ID)
 		return
 	}
 	if err != nil {
-		log.Printf("[worker %d] mark retrying %s: %v", w.id, j.ID, err)
+		w.log().Error("mark retrying error", "job_id", j.ID, "err", err)
 		return
 	}
-	log.Printf("[worker %d] job %s will retry in %v (attempt %d/%d)",
-		w.id, j.ID, delay.Round(time.Millisecond), j.Attempts, j.MaxAttempts)
+	w.log().Info("job will retry", "job_id", j.ID, "delay", delay.Round(time.Millisecond),
+		"attempt", j.Attempts, "max_attempts", j.MaxAttempts)
 }
 
 func (w *Worker) heartbeat(ctx context.Context, cancelJob context.CancelFunc, id string, attempt int) {
@@ -145,12 +149,12 @@ func (w *Worker) heartbeat(ctx context.Context, cancelJob context.CancelFunc, id
 				return // job finished while the writr was in fight
 			}
 			if errors.Is(err, job.ErrNotOwner) {
-				log.Printf("[worker %d] job %s was taken over, abondoning it", w.id, id)
+				w.log().Info("job taken over, abondoning it", "job_id", id)
 				cancelJob()
 				return
 			}
 			if err != nil {
-				log.Printf("[worker %d] heartbeat %s: %v", w.id, id, err)
+				w.log().Error("heartbeat error", "job_id", id, "err", err)
 			}
 		}
 	}

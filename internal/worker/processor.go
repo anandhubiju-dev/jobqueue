@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/anandhubiju-dev/jobqueue/internal/job"
@@ -44,7 +44,7 @@ func (w *Worker) process(ctx context.Context, j *job.Job) error {
 			return err
 		}
 		if !created {
-			log.Printf("[worker %d] job %s: charge already recorded, skipping", w.id, j.ID)
+			slog.Info("charge already recorded, skipping", "job_id", j.ID)
 		}
 		if p.FailAfterCharge && j.Attempts == 1 {
 			return fmt.Errorf("lost connection after charging")

@@ -3,7 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -67,7 +67,7 @@ func (h *Handler) createJob(c *gin.Context) {
 	}
 
 	if err != nil {
-		log.Printf("create job: %v", err)
+		slog.Error("create job failed", "err", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
@@ -82,7 +82,7 @@ func (h *Handler) getJob(c *gin.Context) {
 		return
 	}
 	if err != nil {
-		log.Printf("get job: %v", err)
+		slog.Error("get job failed", "err", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}

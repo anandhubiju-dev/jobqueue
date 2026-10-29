@@ -5,6 +5,7 @@ import (
 
 	"errors"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -22,9 +23,9 @@ import (
 )
 
 func main() {
-	if host, err := os.Hostname(); err == nil {
-		log.SetPrefix("[" + host + "] ")
-	}
+	host, _ := os.Hostname()
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil)).With("instance", host)
+	slog.SetDefault(logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -51,10 +52,10 @@ func main() {
 		}
 		defer rq.Close()
 		q = rq
-		log.Println("using redis queue")
+		slog.Info("using redis queue")
 	default:
 		q = queue.NewInMemory(100)
-		log.Println("using in-memory queue")
+		slog.Info("using in-memory queue")
 	}
 
 	svc := service.New(st, q)
@@ -89,20 +90,20 @@ func main() {
 
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("http server: %v", err)
+			slog.Error("http server failed", "err", err)
 			stop()
 		}
 	}()
 
 	<-ctx.Done()
-	log.Println("shutting down")
+	slog.Info("shutting down")
 
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelShutdown()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Printf("http shutdown: %v", err)
+		slog.Error("http shutdown failed", "err", err)
 	}
 
 	wg.Wait()
-	log.Println("shutdown complete")
+	slog.Info("shutdown complete")
 }

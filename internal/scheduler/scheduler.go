@@ -2,7 +2,7 @@ package scheduler
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"time"
 )
 
@@ -28,6 +28,10 @@ func New(s Store, q Queue, interval time.Duration) *Scheduler {
 	return &Scheduler{store: s, queue: q, interval: interval}
 }
 
+func (s *Scheduler) log() *slog.Logger {
+	return slog.With("component", "scheduler")
+}
+
 const staleAfter = 6 * time.Second // 3 missed heartbeats
 const orphanGrace = 10 * time.Second
 
@@ -38,7 +42,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("[scheduler] stopping: %v", ctx.Err())
+			s.log().Info("scheduler stopping", "reason", ctx.Err())
 			return
 		case <-ticker.C:
 			s.tick(ctx)
@@ -50,48 +54,48 @@ func (s *Scheduler) tick(ctx context.Context) {
 	now := time.Now()
 	lost, err := s.store.ReclaimStale(ctx, now, now, now.Add(-staleAfter), 50)
 	if err != nil {
-		log.Printf("[scheduler] reclaim stale: %v", err)
+		s.log().Error("reclaim stale failed", "err", err)
 	}
 	for _, id := range lost {
-		log.Printf("[scheduler] reclaimed stale job %s", id)
+		s.log().Info("reclaimed stale job", "job_id", id)
 	}
 
 	scheduled, err := s.store.ListDueQueued(ctx, time.Now(), 50)
 	if err != nil {
-		log.Printf("[scheduler] list due scheduled: %v", err)
+		s.log().Error("list due scheduled failed", "err", err)
 	}
 	for _, id := range scheduled {
 		if err := s.queue.Enqueue(ctx, id); err != nil {
-			log.Printf("[scheduler] enqueue scheduled %s: %v", id, err)
+			s.log().Warn("enqueue scheduled failed", "job_id", id, "err", err)
 			break
 		}
-		log.Printf("[scheduler] enqueued scheduled job %s", id)
+		s.log().Info("enqueued scheduled job", "job_id", id)
 	}
 
 	ids, err := s.store.ClaimDue(ctx, time.Now(), 50)
 	if err != nil {
-		log.Printf("[scheduler] claim due: %v", err)
+		s.log().Error("claim due failed", "err", err)
 		return
 	}
 	for _, id := range ids {
 		if err := s.queue.Enqueue(ctx, id); err != nil {
-			log.Printf("[scheduler] enqueue %s: %v, back to retrying", id, err)
+			s.log().Warn("enqueue failed back to retrying", "job_id", id, "err", err)
 			_ = s.store.Requeue(context.WithoutCancel(ctx), id, time.Now().Add(time.Second), "queue full")
 			continue
 		}
-		log.Printf("[scheduler] re-enqueued job %s", id)
+		s.log().Info("re-enqueued job", "job_id", id)
 	}
 
 	orphans, err := s.store.ListOrphanedQueued(ctx, time.Now(), time.Now().Add(-orphanGrace), 50)
 	if err != nil {
-		log.Printf("[scheduler] list orphaned: %v", err)
+		s.log().Error("list orphaned failed", "err", err)
 		return
 	}
 	for _, id := range orphans {
 		if err := s.queue.Enqueue(ctx, id); err != nil {
-			log.Printf("[scheduler] enqueue orphan %s: %v", id, err)
+			s.log().Warn("enqueue orphaned failed", "job_id", id, "err", err)
 			break
 		}
-		log.Printf("[scheduler] re-enqueued orphaned job %s", id)
+		s.log().Info("re-enqueued orphaned job", "job_id", id)
 	}
 }
