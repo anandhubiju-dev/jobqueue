@@ -42,6 +42,14 @@ func (w *Worker) log() *slog.Logger {
 	return slog.With("worker", w.id)
 }
 
+func (w *Worker) jobLog(j *job.Job) *slog.Logger {
+	l := w.log().With("job_id", j.ID)
+	if j.CreatedByRequestID != nil {
+		l = l.With("request_id", *j.CreatedByRequestID)
+	}
+	return l
+}
+
 func (w *Worker) Run(ctx context.Context) {
 	for {
 		id, err := w.queue.Dequeue(ctx)
@@ -69,7 +77,7 @@ func (w *Worker) handle(ctx context.Context, id string) {
 		return
 	}
 
-	w.log().Info("job started", "job_id", j.ID, "type", j.Type, "attempt", j.Attempts)
+	w.jobLog(j).Info("job started", "type", j.Type, "attempt", j.Attempts)
 
 	jobCtx, cancel := context.WithTimeout(ctx, jobTimeout)
 
@@ -97,7 +105,7 @@ func (w *Worker) handle(ctx context.Context, id string) {
 		return
 	}
 
-	w.log().Info("job finished", "job_id", id, "attempt", j.Attempts)
+	w.jobLog(j).Info("job finished", "attempt", j.Attempts)
 }
 
 func (w *Worker) fail(j *job.Job, cause error) {

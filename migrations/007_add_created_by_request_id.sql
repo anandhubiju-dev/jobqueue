@@ -1,0 +1,1 @@
+ALTER TABLE jobs ADD COLUMN created_by_request_id text;

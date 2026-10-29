@@ -37,7 +37,7 @@ func TestCreateScheduling(t *testing.T) {
 	create := func(runAt time.Time) (*job.Job, *fakeQueue, error) {
 		q := &fakeQueue{}
 		svc := New(&fakeStore{}, q)
-		j, err := svc.Create(ctx, "email", payload, "", runAt)
+		j, err := svc.Create(ctx, "email", payload, "", runAt, "")
 		return j, q, err
 	}
 

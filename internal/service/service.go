@@ -41,7 +41,7 @@ var validTypes = map[string]bool{
 	"payment":      true,
 }
 
-func (s *Service) Create(ctx context.Context, jobType string, payload json.RawMessage, key string, runAt time.Time) (*job.Job, error) {
+func (s *Service) Create(ctx context.Context, jobType string, payload json.RawMessage, key string, runAt time.Time, requestID string) (*job.Job, error) {
 	if !validTypes[jobType] {
 		return nil, fmt.Errorf("%w: unknown type %q", ErrInvalidJob, jobType)
 	}
@@ -69,6 +69,10 @@ func (s *Service) Create(ctx context.Context, jobType string, payload json.RawMe
 
 	if key != "" {
 		j.IdempotencyKey = &key
+	}
+
+	if requestID != "" {
+		j.CreatedByRequestID = &requestID
 	}
 
 	created, err := s.store.Insert(ctx, j)

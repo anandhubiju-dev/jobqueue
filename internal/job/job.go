@@ -17,18 +17,19 @@ const (
 )
 
 type Job struct {
-	ID             string          `json:"id"`
-	Type           string          `json:"type"`
-	Payload        json.RawMessage `json:"payload"`
-	Status         Status          `json:"status"`
-	Attempts       int             `json:"attempts"`
-	MaxAttempts    int             `json:"max_attempts"`
-	RunAt          time.Time       `json:"run_at"`
-	CreatedAt      time.Time       `json:"created_at"`
-	StartedAt      *time.Time      `json:"started_at"`
-	CompletedAt    *time.Time      `json:"completed_at"`
-	Error          *string         `json:"error"`
-	IdempotencyKey *string         `json:"-"`
+	ID                 string          `json:"id"`
+	Type               string          `json:"type"`
+	Payload            json.RawMessage `json:"payload"`
+	Status             Status          `json:"status"`
+	Attempts           int             `json:"attempts"`
+	MaxAttempts        int             `json:"max_attempts"`
+	RunAt              time.Time       `json:"run_at"`
+	CreatedAt          time.Time       `json:"created_at"`
+	StartedAt          *time.Time      `json:"started_at"`
+	CompletedAt        *time.Time      `json:"completed_at"`
+	Error              *string         `json:"error"`
+	IdempotencyKey     *string         `json:"-"`
+	CreatedByRequestID *string         `json:"-"`
 }
 
 var ErrNotFound = errors.New("job not found")

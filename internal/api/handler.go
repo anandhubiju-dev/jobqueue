@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"net/http"
 	"time"
 
@@ -55,7 +54,7 @@ func (h *Handler) createJob(c *gin.Context) {
 	}
 
 	key := c.GetHeader("Idempotency-Key")
-	j, err := h.svc.Create(c.Request.Context(), req.Type, req.Payload, key, runAt)
+	j, err := h.svc.Create(c.Request.Context(), req.Type, req.Payload, key, runAt, RequestID(c.Request.Context()))
 	if errors.Is(err, service.ErrInvalidJob) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -67,7 +66,7 @@ func (h *Handler) createJob(c *gin.Context) {
 	}
 
 	if err != nil {
-		slog.Error("create job failed", "err", err)
+		reqLog(c.Request.Context()).Error("create job failed", "err", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
@@ -82,8 +81,8 @@ func (h *Handler) getJob(c *gin.Context) {
 		return
 	}
 	if err != nil {
-		slog.Error("get job failed", "err", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		reqLog(c.Request.Context()).Error("get job failed", "err", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error", "request_id": RequestID(c.Request.Context())})
 		return
 	}
 
@@ -91,6 +90,7 @@ func (h *Handler) getJob(c *gin.Context) {
 }
 
 func (h *Handler) Register(r *gin.Engine) {
+	r.Use(requestIDMiddleware())
 	r.POST("/jobs", h.createJob)
 	r.GET("/jobs/:id", h.getJob)
 }
