@@ -15,6 +15,10 @@ func NewInMemory(size int) *InMemory {
 	return &InMemory{ch: make(chan string, size)}
 }
 
+func (q *InMemory) Len(ctx context.Context) (int64, error) {
+	return int64(len(q.ch)), nil
+}
+
 func (q *InMemory) Enqueue(ctx context.Context, id string) error {
 	select {
 	case q.ch <- id:

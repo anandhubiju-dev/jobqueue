@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/anandhubiju-dev/jobqueue/internal/job"
+	"github.com/anandhubiju-dev/jobqueue/internal/metrics"
 )
 
 const jobTimeout = 10 * time.Second
@@ -79,6 +80,9 @@ func (w *Worker) handle(ctx context.Context, id string) {
 
 	w.jobLog(j).Info("job started", "type", j.Type, "attempt", j.Attempts)
 
+	metrics.JobsStarted.Add(1)
+	start := time.Now()
+
 	jobCtx, cancel := context.WithTimeout(ctx, jobTimeout)
 
 	hbDone := make(chan struct{})
@@ -90,6 +94,7 @@ func (w *Worker) handle(ctx context.Context, id string) {
 	err = w.process(jobCtx, j)
 	cancel()
 	<-hbDone
+	metrics.ObserveDuration(time.Since(start))
 	if err != nil {
 		w.log().Warn("job failed", "job_id", id, "permanent", IsPermanent(err), "err", err)
 		w.retryOrFail(j, err)
@@ -102,9 +107,11 @@ func (w *Worker) handle(ctx context.Context, id string) {
 			return
 		}
 		w.log().Error("complete job failed", "job_id", id, "err", err)
+		metrics.JobsTakenOver.Add(1)
 		return
 	}
 
+	metrics.JobsCompleted.Add(1)
 	w.jobLog(j).Info("job finished", "attempt", j.Attempts)
 }
 
@@ -119,6 +126,7 @@ func (w *Worker) fail(j *job.Job, cause error) {
 	if err != nil {
 		w.log().Error("mark failed over", "job_id", j.ID, "err", err)
 	}
+	metrics.JobsFailed.Add(1)
 }
 
 func (w *Worker) retryOrFail(j *job.Job, cause error) {
@@ -139,6 +147,7 @@ func (w *Worker) retryOrFail(j *job.Job, cause error) {
 		w.log().Error("mark retrying error", "job_id", j.ID, "err", err)
 		return
 	}
+	metrics.JobsRetried.Add(1)
 	w.log().Info("job will retry", "job_id", j.ID, "delay", delay.Round(time.Millisecond),
 		"attempt", j.Attempts, "max_attempts", j.MaxAttempts)
 }

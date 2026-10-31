@@ -64,3 +64,11 @@ func (q *Redis) Dequeue(ctx context.Context) (string, error) {
 		return res[1], nil // res[0] is the key, res[1] is the value
 	}
 }
+
+func (q *Redis) Len(ctx context.Context) (int64, error) {
+	n, err := q.client.LLen(ctx, q.key).Result()
+	if err != nil {
+		return 0, fmt.Errorf("redis llen: %w", err)
+	}
+	return n, nil
+}

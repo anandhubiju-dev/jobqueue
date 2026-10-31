@@ -267,3 +267,22 @@ func (s *Store) RecordCharge(ctx context.Context, jobID string, amountCents int)
 	}
 	return tag.RowsAffected() == 1, nil
 }
+
+func (s *Store) CountByStatus(ctx context.Context) (map[string]int64, error) {
+	rows, err := s.pool.Query(ctx, `SELECT status, count(*) FROM jobs GROUP BY status`)
+	if err != nil {
+		return nil, fmt.Errorf("count by status: %w", err)
+	}
+	defer rows.Close()
+
+	out := make(map[string]int64)
+	for rows.Next() {
+		var status string
+		var n int64
+		if err := rows.Scan(&status, &n); err != nil {
+			return nil, fmt.Errorf("scan status count: %w", err)
+		}
+		out[status] = n
+	}
+	return out, rows.Err()
+}

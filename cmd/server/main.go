@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"errors"
+	"expvar"
 	"log"
 	"log/slog"
 	"net/http"
@@ -14,11 +15,13 @@ import (
 	"time"
 
 	"github.com/anandhubiju-dev/jobqueue/internal/api"
+	"github.com/anandhubiju-dev/jobqueue/internal/metrics"
 	"github.com/anandhubiju-dev/jobqueue/internal/queue"
 	"github.com/anandhubiju-dev/jobqueue/internal/scheduler"
 	"github.com/anandhubiju-dev/jobqueue/internal/service"
 	"github.com/anandhubiju-dev/jobqueue/internal/store"
 	"github.com/anandhubiju-dev/jobqueue/internal/worker"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -58,6 +61,29 @@ func main() {
 		slog.Info("using in-memory queue")
 	}
 
+	metrics.RegisterGauge("queue_depth", func() int64 {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		n, err := q.Len(ctx)
+		if err != nil {
+			return -1 // -1 means "could not read"
+		}
+		return n
+	})
+
+	for _, status := range []string{"queued", "processing", "retrying", "completed", "failed"} {
+		status := status
+		metrics.RegisterGauge("jobs_in_status_"+status, func() int64 {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			counts, err := st.CountByStatus(ctx)
+			if err != nil {
+				return -1
+			}
+			return counts[status]
+		})
+	}
+
 	svc := service.New(st, q)
 
 	const numWorkers = 4
@@ -84,6 +110,9 @@ func main() {
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
+
+	r.GET("/debug/vars", gin.WrapH(expvar.Handler()))
+
 	api.New(svc).Register(r)
 
 	srv := &http.Server{Addr: ":8080", Handler: r}
