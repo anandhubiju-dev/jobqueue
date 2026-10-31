@@ -107,13 +107,11 @@ func main() {
 
 	r := gin.Default()
 
-	r.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
-	})
-
 	r.GET("/debug/vars", gin.WrapH(expvar.Handler()))
 
 	api.New(svc).Register(r)
+
+	api.RegisterHealth(r, st, q)
 
 	srv := &http.Server{Addr: ":8080", Handler: r}
 

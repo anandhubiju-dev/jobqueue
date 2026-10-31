@@ -6,6 +6,7 @@ type Queue interface {
 	Enqueue(ctx context.Context, id string) error
 	Dequeue(ctx context.Context) (string, error)
 	Len(ctx context.Context) (int64, error)
+	Ping(ctx context.Context) error
 }
 
 var (

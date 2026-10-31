@@ -72,3 +72,7 @@ func (q *Redis) Len(ctx context.Context) (int64, error) {
 	}
 	return n, nil
 }
+
+func (q *Redis) Ping(ctx context.Context) error {
+	return q.client.Ping(ctx).Err()
+}

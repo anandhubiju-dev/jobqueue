@@ -36,3 +36,7 @@ func (q *InMemory) Dequeue(ctx context.Context) (string, error) {
 		return "", ctx.Err()
 	}
 }
+
+func (q *InMemory) Ping(ctx context.Context) error {
+	return nil // in-process channel: nothing external to check
+}
