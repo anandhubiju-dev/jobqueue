@@ -50,6 +50,7 @@ services:
     environment:
       TEST_DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       TEST_REDIS_URL: redis://redis:6379/0
+      CGO_ENABLED: "1"
     depends_on:
       postgres:
         condition: service_healthy
