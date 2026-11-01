@@ -84,6 +84,16 @@ func main() {
 		})
 	}
 
+	metrics.RegisterGauge("oldest_queued_age_seconds", func() int64 {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		age, err := st.OldestQueuedAge(ctx, time.Now())
+		if err != nil {
+			return -1
+		}
+		return int64(age.Seconds())
+	})
+
 	svc := service.New(st, q)
 
 	const numWorkers = 4

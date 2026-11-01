@@ -286,3 +286,17 @@ func (s *Store) CountByStatus(ctx context.Context) (map[string]int64, error) {
 	}
 	return out, rows.Err()
 }
+
+func (s *Store) OldestQueuedAge(ctx context.Context, now time.Time) (time.Duration, error) {
+	var oldest *time.Time
+	err := s.pool.QueryRow(ctx,
+		`SELECT min(run_at) FROM jobs WHERE status = 'queued' AND run_at <= $1`,
+		now).Scan(&oldest)
+	if err != nil {
+		return 0, fmt.Errorf("oldest queued: %w", err)
+	}
+	if oldest == nil {
+		return 0, nil // no queued jobs
+	}
+	return now.Sub(*oldest), nil
+}

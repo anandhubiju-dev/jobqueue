@@ -442,3 +442,23 @@ func TestListDueQueued(t *testing.T) {
 		t.Fatal("due scheduled job not listed")
 	}
 }
+
+func TestOldestQueuedAge(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	id := insertTestJob(t, st)
+	_, err := st.pool.Exec(ctx,
+		"UPDATE jobs SET run_at = now() - interval '2 minutes' WHERE id = $1", id)
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	age, err := st.OldestQueuedAge(ctx, time.Now())
+	if err != nil {
+		t.Fatalf("age: %v", err)
+	}
+	if age < 2*time.Minute {
+		t.Fatalf("age = %v, want at least 2m", age)
+	}
+}
