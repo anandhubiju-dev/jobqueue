@@ -28,3 +28,9 @@ func TestBackoff(t *testing.T) {
 		t.Fatalf("attempt 200: delay %v", d)
 	}
 }
+
+func BenchmarkBackoff(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		backoff(3)
+	}
+}

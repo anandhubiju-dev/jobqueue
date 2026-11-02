@@ -34,3 +34,17 @@ func TestDequeueCancel(t *testing.T) {
 		t.Fatalf("want DeadlineExceeded, got %v", err)
 	}
 }
+
+func BenchmarkInMemoryEnqueueDequeue(b *testing.B) {
+	q := NewInMemory(1)
+	ctx := context.Background()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if err := q.Enqueue(ctx, "id"); err != nil {
+			b.Fatal(err)
+		}
+		if _, err := q.Dequeue(ctx); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

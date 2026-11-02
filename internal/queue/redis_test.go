@@ -10,7 +10,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func newTestRedis(t *testing.T, size int) *Redis {
+func newTestRedis(t testing.TB, size int) *Redis {
 	t.Helper()
 
 	url := os.Getenv("TEST_REDIS_URL")
@@ -70,5 +70,20 @@ func TestRedisDequeueCancel(t *testing.T) {
 
 	if _, err := q.Dequeue(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("want DeadlineExceeded, got %v", err)
+	}
+}
+
+func BenchmarkRedisEnqueueDequeue(b *testing.B) {
+	q := newTestRedis(b, 1000)
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := q.Enqueue(ctx, "id"); err != nil {
+			b.Fatal(err)
+		}
+		if _, err := q.Dequeue(ctx); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
