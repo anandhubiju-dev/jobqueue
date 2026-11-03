@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/anandhubiju-dev/jobqueue/internal/job"
@@ -15,6 +16,7 @@ type Store interface {
 	Insert(ctx context.Context, j *job.Job) (bool, error)
 	Get(ctx context.Context, id string) (*job.Job, error)
 	GetByKey(ctx context.Context, key string) (*job.Job, error)
+	DeleteQueued(ctx context.Context, id string) error
 }
 type Queue interface {
 	Enqueue(ctx context.Context, id string) error
@@ -88,6 +90,12 @@ func (s *Service) Create(ctx context.Context, jobType string, payload json.RawMe
 	}
 
 	if err := s.queue.Enqueue(ctx, j.ID); err != nil {
+		// The client will be told this failed, so the job must not exist.
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if derr := s.store.DeleteQueued(cctx, j.ID); derr != nil {
+			slog.Error("could not remove rejected job; orphan sweep may run it", "job_id", j.ID, "err", derr)
+		}
 		return nil, fmt.Errorf("enqueue job %s: %w", j.ID, err)
 	}
 	return j, nil

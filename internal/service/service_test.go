@@ -10,7 +10,10 @@ import (
 	"github.com/anandhubiju-dev/jobqueue/internal/job"
 )
 
-type fakeStore struct{ inserted []*job.Job }
+type fakeStore struct {
+	inserted []*job.Job
+	deleted  []string
+}
 
 func (f *fakeStore) Insert(ctx context.Context, j *job.Job) (bool, error) {
 	f.inserted = append(f.inserted, j)
@@ -22,10 +25,20 @@ func (f *fakeStore) Get(ctx context.Context, id string) (*job.Job, error) {
 func (f *fakeStore) GetByKey(ctx context.Context, key string) (*job.Job, error) {
 	return nil, job.ErrNotFound
 }
+func (f *fakeStore) DeleteQueued(ctx context.Context, id string) error {
+	f.deleted = append(f.deleted, id)
+	return nil
+}
 
-type fakeQueue struct{ ids []string }
+type fakeQueue struct {
+	ids []string
+	err error
+}
 
 func (f *fakeQueue) Enqueue(ctx context.Context, id string) error {
+	if f.err != nil {
+		return f.err
+	}
 	f.ids = append(f.ids, id)
 	return nil
 }
@@ -71,4 +84,18 @@ func TestCreateScheduling(t *testing.T) {
 			t.Fatalf("want ErrInvalidJob, got %v", err)
 		}
 	})
+}
+
+func TestCreateRemovesRowWhenEnqueueFails(t *testing.T) {
+	errFull := errors.New("queue is full")
+	st := &fakeStore{}
+	svc := New(st, &fakeQueue{err: errFull})
+
+	_, err := svc.Create(context.Background(), "email", json.RawMessage(`{}`), "", time.Time{}, "")
+	if !errors.Is(err, errFull) {
+		t.Fatalf("want the enqueue error, got %v", err)
+	}
+	if len(st.inserted) != 1 || len(st.deleted) != 1 || st.deleted[0] != st.inserted[0].ID {
+		t.Fatalf("inserted=%d deleted=%v: the rejected row must be deleted", len(st.inserted), st.deleted)
+	}
 }

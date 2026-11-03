@@ -462,3 +462,28 @@ func TestOldestQueuedAge(t *testing.T) {
 		t.Fatalf("age = %v, want at least 2m", age)
 	}
 }
+
+func TestDeleteQueued(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	queued := insertTestJob(t, st)
+	claimed := insertTestJob(t, st)
+	if err := st.MarkProcessing(ctx, claimed, time.Now()); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+
+	if err := st.DeleteQueued(ctx, queued); err != nil {
+		t.Fatalf("delete queued: %v", err)
+	}
+	if _, err := st.Get(ctx, queued); err != job.ErrNotFound {
+		t.Fatalf("queued job should be gone, got %v", err)
+	}
+
+	if err := st.DeleteQueued(ctx, claimed); err != nil {
+		t.Fatalf("delete claimed: %v", err)
+	}
+	if _, err := st.Get(ctx, claimed); err != nil {
+		t.Fatalf("a claimed job must survive DeleteQueued, got %v", err)
+	}
+}

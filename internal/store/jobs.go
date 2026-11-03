@@ -300,3 +300,12 @@ func (s *Store) OldestQueuedAge(ctx context.Context, now time.Time) (time.Durati
 	}
 	return now.Sub(*oldest), nil
 }
+
+func (s *Store) DeleteQueued(ctx context.Context, id string) error {
+	_, err := s.pool.Exec(ctx,
+		`DELETE FROM jobs WHERE id = $1 AND status = 'queued'`, id)
+	if err != nil {
+		return fmt.Errorf("delete queued %s: %w", id, err)
+	}
+	return nil
+}
