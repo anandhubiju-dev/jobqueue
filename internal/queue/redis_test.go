@@ -77,8 +77,8 @@ func BenchmarkRedisEnqueueDequeue(b *testing.B) {
 	q := newTestRedis(b, 1000)
 	ctx := context.Background()
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+
+	for b.Loop() {
 		if err := q.Enqueue(ctx, "id"); err != nil {
 			b.Fatal(err)
 		}
