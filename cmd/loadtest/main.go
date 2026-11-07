@@ -10,6 +10,7 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -152,6 +153,21 @@ func main() {
 	}
 	idx := make(chan int)
 	var pwg sync.WaitGroup
+	var finishedCount atomic.Int64
+	stopProgress := make(chan struct{})
+	go func() {
+		t := time.NewTicker(2 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				fmt.Printf("  progress: %d/%d finished after %v\n",
+					finishedCount.Load(), len(ids), time.Since(start).Round(time.Second))
+			case <-stopProgress:
+				return
+			}
+		}
+	}()
 	for p := 0; p < pollers; p++ {
 		pwg.Add(1)
 		go func() {

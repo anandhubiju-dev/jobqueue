@@ -26,7 +26,8 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       QUEUE: redis
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://redis:6379/0?pool_size=400
+      WORKERS: "256"
     depends_on:
       postgres:
         condition: service_healthy

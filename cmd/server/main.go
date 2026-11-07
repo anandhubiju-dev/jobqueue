@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -49,7 +50,7 @@ func main() {
 	var q queue.Queue
 	switch os.Getenv("QUEUE") {
 	case "redis":
-		rq, err := queue.NewRedis(context.Background(), os.Getenv("REDIS_URL"), 100)
+		rq, err := queue.NewRedis(context.Background(), os.Getenv("REDIS_URL"), 5000)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -96,7 +97,11 @@ func main() {
 
 	svc := service.New(st, q)
 
-	const numWorkers = 4
+	numWorkers := 4
+	if v, err := strconv.Atoi(os.Getenv("WORKERS")); err == nil && v > 0 {
+		numWorkers = v
+	}
+	slog.Info("starting workers", "count", numWorkers)
 
 	var wg sync.WaitGroup
 	for i := 1; i <= numWorkers; i++ {

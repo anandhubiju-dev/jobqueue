@@ -53,8 +53,17 @@ func (w *Worker) Run(ctx context.Context) {
 	for {
 		id, err := w.queue.Dequeue(ctx)
 		if err != nil {
-			w.log().Info("worker stopping", "reason", err)
-			return
+			if ctx.Err() != nil {
+				w.log().Info("worker stopping", "reason", ctx.Err())
+				return
+			}
+			w.log().Error("dequeue failed, retrying", "err", err)
+			select {
+			case <-time.After(time.Second):
+			case <-ctx.Done():
+				return
+			}
+			continue
 		}
 		w.handle(context.WithoutCancel(ctx), id)
 	}
