@@ -8,6 +8,7 @@ import (
 	"log"
 	"log/slog"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"strconv"
@@ -137,6 +138,19 @@ func main() {
 		}
 	}()
 
+	pm := http.NewServeMux()
+	pm.HandleFunc("/debug/pprof/", pprof.Index)
+	pm.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	pm.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	pm.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+
+	pprofSrv := &http.Server{Addr: "127.0.0.1:6060", Handler: pm}
+	go func() {
+		if err := pprofSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("pprof server failed", "err", err)
+		}
+	}()
+
 	<-ctx.Done()
 	slog.Info("shutting down")
 
@@ -145,6 +159,7 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("http shutdown failed", "err", err)
 	}
+	_ = pprofSrv.Shutdown(shutdownCtx)
 
 	wg.Wait()
 	slog.Info("shutdown complete")

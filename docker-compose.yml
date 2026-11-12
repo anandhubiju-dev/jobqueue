@@ -24,7 +24,7 @@ services:
   app:
     build: .
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?pool_max_conns=64
       QUEUE: redis
       REDIS_URL: redis://redis:6379/0?pool_size=400
       WORKERS: "256"
