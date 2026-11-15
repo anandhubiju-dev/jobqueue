@@ -369,15 +369,106 @@ Retrying jobs wake through the scheduler's polling rather than an in-memory time
 
 ## Why Redis
 
-_To be written._
+The queue started as a buffered Go channel. That was deliberate: it made the hand-off, blocking and backpressure visible. It has three limits once there is more than one process:
+
+1. **It is not shared.** A job created on instance A sits in A's channel, so B's idle workers cannot see it. B would only find it through the orphan sweep, after its 10 s grace.
+2. **It is volatile.** A restart drops every queued ID. Nothing is lost, since PostgreSQL still has the rows, but recovery depends on the sweep and adds latency.
+3. **Backpressure is per process.** The queue-full limit applies to each instance, not to the system.
+
+Redis fixes these by being one shared list that every instance pushes to and blocks on. It carries only job IDs, and PostgreSQL stays the source of truth. If Redis drops or duplicates a message, the orphan sweep and the atomic claim cover it.
+
+Redis is not strictly required. PostgreSQL with `FOR UPDATE SKIP LOCKED` can serve as the queue by itself, and many systems do that. Redis buys lower hand-off latency and less polling load on the database, at the cost of another moving part.
+
+**Measured cost** (`go test -bench`, one run, inside Docker on Windows):
+
+| Queue | Enqueue + dequeue | Allocations |
+|---|---|---|
+| In-memory channel | 42.87 ns | 0 B, 0 allocs |
+| Redis | 605,286 ns (about 0.6 ms) | 760 B, 23 allocs |
+
+Redis is roughly 14,000 times slower per hand-off, because `Enqueue` makes two round trips (`LLEN` for the size limit, then `LPUSH`) and `Dequeue` makes one. Docker Desktop adds overhead, so treat the ratio as the lesson, not the absolute figure.
+
+That is invisible for jobs lasting seconds (about 0.03% of a 1 s job). It would dominate for jobs lasting microseconds, where Redis would be the wrong choice.
+
+Observed benefit: with 20 jobs queued and the app restarted, 12 IDs were still in Redis afterwards and the new process drained them immediately. The in-memory queue would have dropped them.
 
 ## Observability
 
-_To be written._
+
+**Structured logs** use `log/slog`. Fields are key-value pairs, so one search follows a job:
+
+```text
+level=INFO msg="job started" instance=2671253fc928 worker=2 job_id=3242b4f3-... request_id=demo-req-2 type=email attempt=1
+```
+
+Standard fields: `instance` (hostname), `worker`, `job_id`, `request_id`, `component=scheduler`. The text handler is used for readability; switching to JSON is a one-line change in `cmd/server/main.go`.
+
+**Request IDs.** Each HTTP request gets an ID, validated before use (1 to 64 characters from `A-Za-z0-9._-`, otherwise a fresh UUID), so clients cannot inject huge or multi-line values into logs. It is returned in `X-Request-ID`, stored as `created_by_request_id`, and logged by the worker. One search by request ID shows the HTTP call and its background execution. The request ID is not the job ID: it names a request, and a request could create several jobs. This is correlation, not distributed tracing.
+
+**Metrics** use the standard library `expvar`, served at `/debug/vars`:
+
+| Name | Kind | Meaning |
+|---|---|---|
+| `jobs_started`, `jobs_completed`, `jobs_failed`, `jobs_retried`, `jobs_taken_over` | counter (per process) | Counted after the database write succeeds |
+| `job_attempt_count`, `job_attempt_ms_total` | counter | Average attempt time is the ratio |
+| `queue_depth` | gauge | IDs waiting in the queue |
+| `jobs_in_status_{queued,processing,retrying,completed,failed}` | gauge | Row counts from PostgreSQL |
+| `oldest_queued_age_seconds` | gauge | Age of the oldest due `queued` job |
+
+Reading them:
+
+- **Queue depth is not outstanding work.** At 20 jobs on 4 workers, `queue_depth` was 16 while `jobs_in_status_processing` was 4. Jobs held by workers have left the queue.
+- **Age beats count.** During a 30-job backlog, the oldest queued age climbed 1, 4, 7, 10 s while the counts moved in steps. Age says whether workers keep up.
+- **Counters are per process.** With several replicas, each has its own, and a request through the proxy returns whichever answered. Scrape each replica separately.
+- `expvar` has no labels or histograms, which is the honest reason to move to Prometheus later.
+- The metric names are plain strings, so a typo compiles fine. We had four such typos. `internal/metrics/metrics_test.go` now checks that the names exist.
+
+**Health checks.** `/healthz` (liveness) answers whenever the process can. `/readyz` (readiness) pings PostgreSQL and the queue with a 2 s timeout. With Redis stopped, `/healthz` stayed 200 and `/readyz` returned 503 with `"queue":"unavailable"`. The two are separate on purpose: restarting the app does not fix a dead dependency, but sending it traffic does not help either.
+
+**Profiling.** `net/http/pprof` listens on `127.0.0.1:6060` inside the container only, not through the proxy. Capture with `docker compose exec app wget ...`, and analyze inside the `test` container because Windows Application Control blocks `go tool pprof` on the host.
+
 
 ## Performance results
 
-_To be written._
+All runs: one Windows laptop (16 logical CPUs), Docker Desktop, one app replica, Redis queue, `notification` jobs (simulated 1 s). Load test: `go run ./cmd/loadtest`. Jobs are tracked by ID, so wait and execution times come from each job's own timestamps.
+
+**Scaling with workers**
+
+| Workers | Jobs | Throughput | Efficiency | Queue wait p95 | Execution p95 |
+|---|---|---|---|---|---|
+| 4 | 100 | 3.9 jobs/s | 98% | 23.3 s | 1.016 s |
+| 16 | 100 | 13.9 jobs/s | 87% | 5.0 s | 1.008 s |
+| 64 | 3000 | 59.3 jobs/s | 93% | 42.8 s | 1.053 s |
+| 128 | 3000 | 122.1 jobs/s | 95% | 18.9 s | 1.006 s |
+| 128 | 6000 | 119.2 jobs/s | 93% | 38.6 s | 1.081 s |
+| 256 | 6000 | 234.5 jobs/s | 92% | 15.1 s | 1.139 s |
+| 256 | 6000 | 230.1 jobs/s | 90% | 14.5 s | 1.059 s |
+
+Efficiency is throughput divided by workers (the ideal is one job per worker per second). Short runs (100 jobs) are dominated by ramp-up and tail effects. The 32-worker run (24.0 jobs/s, 100 jobs) is omitted because its worker count was inferred, not logged.
+
+What the data supports:
+
+- **Throughput scales almost linearly up to 256 workers**, at about 90% efficiency. It is worker-bound, not API-bound.
+- **The API is never the limit.** Submit p95 was 8 to 9 ms with 4 clients. Higher client counts raised it (34 to 97 ms with 10 to 50 clients), partly the test machine.
+- **Backpressure works.** With a 100-ID queue, 500 submissions gave about 105 `202`s and about 395 `503`s within about 300 ms, and the system stayed up.
+- **Two replicas were run once** (kill-one-instance recovery). Heartbeat reclaim and fencing recovered the dead instance's jobs. Throughput with two replicas was not measured.
+
+What the data does not support:
+
+- **Execution p95 is noisy.** Identical 256-worker runs gave 1.139 s and 1.059 s, and 128 workers gave 1.006 s and 1.081 s. The ranges overlap, so there is no evidence of contention starting at any worker count. The p99 of one run was 1.612 s with a 1.851 s max; the cause was not found.
+- **The pgx pool was predicted to cap throughput near 16 connections. It did not.** Workers hold a connection only for brief claim and finish queries, not during the job. This holds for simulated jobs. Real jobs that hold a connection throughout would differ.
+
+**CPU profiles** (pprof, 12 to 20 s windows):
+
+- Idle with 256 workers: 1.4 to 2.25% CPU. About 76% of it is `Redis.Dequeue`, the parked `BRPOP` calls waking once a second.
+- Under submission load: 19% CPU, about 62% in syscalls and futex (network I/O, goroutine parking), about 32% in HTTP serving. No application function was a hotspot.
+- A CPU profile only shows running code, so it cannot explain the p99 tail. A block profile would be the next tool.
+
+**Micro-benchmark:** `backoff` costs 11 ns and allocates nothing, so it is not worth optimizing.
+
+**Load test defects found and fixed.** Three results came from bugs we then fixed, not from the system: ghost rows left by `503` responses (the row is now deleted), the worker count label printing before the environment variable was read, and a 5000-ID queue size set on a stray second `NewRedis` call so it had no effect. The README numbers above are from after those fixes.
+
+**Open questions.** The p99 tail, the cost of the orphan sweep under deep backlogs, and throughput with several replicas.
 
 ## Running locally
 
