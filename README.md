@@ -394,7 +394,6 @@ Observed benefit: with 20 jobs queued and the app restarted, 12 IDs were still i
 
 ## Observability
 
-
 **Structured logs** use `log/slog`. Fields are key-value pairs, so one search follows a job:
 
 ```text
@@ -426,7 +425,6 @@ Reading them:
 **Health checks.** `/healthz` (liveness) answers whenever the process can. `/readyz` (readiness) pings PostgreSQL and the queue with a 2 s timeout. With Redis stopped, `/healthz` stayed 200 and `/readyz` returned 503 with `"queue":"unavailable"`. The two are separate on purpose: restarting the app does not fix a dead dependency, but sending it traffic does not help either.
 
 **Profiling.** `net/http/pprof` listens on `127.0.0.1:6060` inside the container only, not through the proxy. Capture with `docker compose exec app wget ...`, and analyze inside the `test` container because Windows Application Control blocks `go tool pprof` on the host.
-
 
 ## Performance results
 
@@ -472,11 +470,94 @@ What the data does not support:
 
 ## Running locally
 
-_To be written._
+**Requirements:** Docker Desktop and Go (the Go toolchain is only needed to run the load test or edit code). Developed on Windows with PowerShell.
+
+**1. Configuration.** Copy `.env.example` to `.env` and set the PostgreSQL values (`POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`). `.env` is not committed.
+
+**2. Start the stack.**
+
+```powershell
+docker compose up -d --build
+```
+
+Services: `postgres`, `redis`, `app`, `proxy` (nginx, the only published port: `8080`), and `test` (only runs with `--profile test`). PostgreSQL and Redis have no host ports.
+
+**3. Apply migrations.** They are applied by hand, in order, on a fresh database:
+
+```powershell
+Get-Content migrations\001_create_jobs.sql | docker compose exec -T postgres psql -U jobqueue -d jobqueue
+```
+
+Repeat for `002` through `007`. Use your own `POSTGRES_USER` and `POSTGRES_DB` if they differ.
+
+**4. Try it.**
+
+```powershell
+Invoke-RestMethod http://localhost:8080/readyz | ConvertTo-Json
+$r = Invoke-RestMethod -Method Post -Uri http://localhost:8080/jobs -ContentType "application/json" -Body '{"type":"email","payload":{}}'
+Start-Sleep 4
+Invoke-RestMethod "http://localhost:8080/jobs/$($r.id)"
+```
+
+**Configuration (environment variables on the `app` service)**
+
+| Variable | Meaning |
+|---|---|
+| `DATABASE_URL` | PostgreSQL connection string (required) |
+| `QUEUE` | `redis`, or anything else for the in-memory queue |
+| `REDIS_URL` | For example `redis://redis:6379/0?pool_size=400`. Keep `pool_size` above `WORKERS` |
+| `WORKERS` | Number of worker goroutines. Default 4 when unset or invalid |
+
+The queue capacity is hard-coded in `cmd/server/main.go` (5000 for Redis, 100 for in-memory). Check the `starting workers` log line to see the count actually in use.
+
+**Several replicas.** `docker compose up -d --build --scale app=2`. The proxy resolves `app` through Docker DNS. Metrics are per process, so read them from one replica at a time.
+
+**Gotchas we hit**
+
+- **502 from the proxy** right after recreating containers: `docker compose restart proxy`.
+- **Windows Application Control** blocked freshly compiled Go binaries on the host (`go run` of the server, `go test` binaries, `go tool pprof`). Tests and profile analysis run inside Docker instead. `go build`, `go vet` and `go run ./cmd/loadtest` worked on the host.
+- **Do not run `docker compose --profile test run` without `--no-deps` while the app is up.** It recreated PostgreSQL and Redis once and took the app down with them.
+- **PowerShell prints every non-2xx response as an exception.** The load test counts them instead.
 
 ## Testing
 
-_To be written._
+Tests run inside Docker, because the database and Redis are only reachable on the Compose network and `-race` needs cgo (enabled on the `test` service).
+
+```powershell
+# everything, under the race detector
+docker compose --profile test run --rm test go test -race ./... -count=1
+
+# pure unit tests, no database or Redis needed
+docker compose --profile test run --rm --no-deps test go test ./internal/worker ./internal/service ./internal/api ./internal/metrics -count=1
+```
+
+`-count=1` disables Go's result cache. Tests that need a database or Redis skip themselves when `TEST_DATABASE_URL` or `TEST_REDIS_URL` is unset.
+
+| Package | What is tested |
+|---|---|
+| `store` | Integration tests against real PostgreSQL: lifecycle transitions, fencing (a replaced worker is rejected), heartbeat, stale reclaim, due retries, orphan listing, scheduled listing, oldest-queued age, idempotency key, idempotent charge, guarded delete |
+| `queue` | In-memory and Redis: FIFO, `ErrFull`, cancellation. Redis tests use a random key per test and delete it afterwards |
+| `worker` | Concurrency test with fake store and queue: 4 workers, 50 jobs, every ID delivered twice, each job must run exactly once. Also backoff bounds and permanent-error classification |
+| `service` | Scheduling rules and cleanup after a rejected enqueue, using fakes |
+| `api` | Request-ID validation |
+| `metrics` | That every expected metric name is registered |
+
+**Why the store tests hit a real database.** Five SQL bugs got past the compiler and `go vet`: a missing `=`, a wrong status literal (twice), and an untyped parameter inside a `CASE` that PostgreSQL inferred as `text`. SQL in a Go string is just text, so only running it finds these.
+
+**The race detector** was verified by planting a bug: removing the lock from the fake store's `MarkCompleted` produced `WARNING: DATA RACE` and a failing test. The scheduler and `cmd/server` have no tests.
+
+**Caveats**
+
+- The store tests share the database with the running app, and a few (`ClaimDue`, `ReclaimStale`) scan the whole table. Stop the app first, or point `TEST_DATABASE_URL` at a separate database.
+- Several tests were not individually checked by breaking them on purpose. Only the race test was.
+
+**Load test**
+
+```powershell
+go run ./cmd/loadtest -n 3000 -c 4 -type notification
+```
+
+Flags: `-url`, `-n` (requests), `-c` (concurrent clients), `-type`, `-wait`. It reports submit latency for accepted requests, rejected and failed counts, then polls every accepted job by ID and reports queue wait, execution time and end-to-end throughput. Known defect: the progress counter prints `0/N` throughout; the final summary is correct.
 
 ## Limitations
 
@@ -493,4 +574,14 @@ _To be written._
 
 ## Lessons learned
 
-_To be written._
+1. **The compiler cannot see strings.** SQL, log keys and metric names are all plain strings. We had wrong SQL, `jpb_id` as a log key, four misspelled metric names, and an `expvar` name collision that panicked at startup. Tests against the real database and a test that the metric names exist now cover the worst of it.
+2. **Make the database decide, not Go.** One atomic `UPDATE ... WHERE status = 'queued'` gives exactly one owner for a job, whether there are 4 workers or several instances. Fencing on `attempts` applies the same idea to late writers.
+3. **A queue message is a hint, not the truth.** Because the queue carries only IDs and PostgreSQL holds the state, lost or duplicated messages are recoverable (orphan sweep, atomic claim) and harmless.
+4. **Exactly-once does not exist across a crash.** We reproduced a double charge with every retry mechanism behaving correctly. Only an idempotent side effect fixed it.
+5. **Polling beat timers for recovery.** In-memory timers die with the process. A scheduler that reads PostgreSQL survived a restart. The cost is up to a second of delay.
+6. **Contexts need thought on shutdown and failure.** A job must finish after shutdown starts (`WithoutCancel`), and the write that records a timeout needs a fresh context, or the row is stranded.
+7. **Measure, and label what you measured.** Several of my predictions were wrong: the pgx pool did not cap throughput, and execution p95 did not show contention at 256 workers. Worker-count labels were wrong twice (a log line printed before the variable was read, and an edit landed on the wrong `NewRedis` call). A load test also exposed ghost rows left by `503` responses, which we fixed. Run-to-run noise (1.139 s vs 1.059 s) is larger than some differences we were tempted to explain.
+8. **Resources hide behind goroutines.** Goroutines are cheap, but each idle worker held a Redis connection, and 256 workers hung until the pool was resized.
+9. **Environment friction is a design input.** Windows security policy pushed everything into Docker early, which made the setup closer to deployment.
+
+**Not done, in rough order of value:** a few dequeuer goroutines instead of one blocked Redis connection per worker; a bounded shutdown drain; a block profile to explain the p99 tail; Prometheus metrics with labels and histograms; automatic migrations; tests for the scheduler; a load test with several replicas; restricting `/debug/vars`.
