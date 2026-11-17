@@ -102,11 +102,24 @@ func main() {
 	if v, err := strconv.Atoi(os.Getenv("WORKERS")); err == nil && v > 0 {
 		numWorkers = v
 	}
-	slog.Info("starting workers", "count", numWorkers)
+	numDequeuers := 4
+	if v, err := strconv.Atoi(os.Getenv("DEQUEUERS")); err == nil && v > 0 {
+		numDequeuers = v
+	}
+	slog.Info("starting workers", "count", numWorkers, "dequeuers", numDequeuers)
 
 	var wg sync.WaitGroup
+
+	// A few goroutines read from the queue and hand IDs to all workers.
+	dispatch := queue.NewFanout(ctx, q, numDequeuers)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		dispatch.Wait()
+	}()
+
 	for i := 1; i <= numWorkers; i++ {
-		w := worker.New(i, q, st)
+		w := worker.New(i, dispatch, st)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -114,7 +127,7 @@ func main() {
 		}()
 	}
 
-	sched := scheduler.New(st, q, time.Second) // NEW
+	sched := scheduler.New(st, q, time.Second)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -130,7 +143,6 @@ func main() {
 	api.RegisterHealth(r, st, q)
 
 	srv := &http.Server{Addr: ":8080", Handler: r}
-
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("http server failed", "err", err)
