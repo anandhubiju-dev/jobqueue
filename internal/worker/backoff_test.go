@@ -30,7 +30,7 @@ func TestBackoff(t *testing.T) {
 }
 
 func BenchmarkBackoff(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		backoff(3)
 	}
 }

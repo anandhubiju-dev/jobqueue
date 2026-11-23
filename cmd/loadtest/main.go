@@ -188,6 +188,7 @@ func main() {
 								}
 							}
 							outcomes[i] = o
+							finishedCount.Add(1)
 							break
 						}
 					}
