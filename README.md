@@ -38,7 +38,7 @@ Client -> API -> store job -> queue -> respond (202)
                               worker -> process in background
 ```
 
-In local load tests, `POST /jobs` had a p95 latency of 7 to 10 ms with 2 to 5 concurrent clients and 34 to 97 ms with 10 to 50 clients, while background processing took seconds per job. These runs were on one laptop with Docker Desktop, so the high-concurrency figures partly measure the test machine. See [Performance results](#performance-results).
+In local load tests, `POST /jobs` had a p95 latency of 6 to 10 ms with 2 to 5 concurrent clients and 34 to 97 ms with 10 to 50 clients, while background processing took seconds per job. These runs were on one laptop with Docker Desktop, so the high-concurrency figures partly measure the test machine. See [Performance results](#performance-results).
 
 The project is also a study of what Go offers for this: goroutines, channels, `context`, graceful shutdown, and the race detector. Each technology was added only after a measured or observed limitation justified it.
 
@@ -59,6 +59,9 @@ nginx (proxy, port 8080)
 |   request IDs)      create) |
 |                             +--> Queue ---------> Redis list
 |                                  (job IDs only)    (or in-memory channel)
+|                                        |
+|                                        v
+|                              Fanout (few dequeuer goroutines)
 |                                        |
 |                                        v
 |                              Worker pool (N goroutines)
@@ -90,9 +93,10 @@ This is the design. It has not been load tested with several replicas. Two repli
 | `internal/api` | HTTP handlers, request-ID middleware, health endpoints |
 | `internal/service` | Validation and job creation rules |
 | `internal/store` | All PostgreSQL access (pgx, plain SQL) |
-| `internal/queue` | `Queue` interface with `InMemory` and `Redis` implementations |
+| `internal/queue` | `Queue` interface with `InMemory` and `Redis` implementations, plus `Fanout` |
 | `internal/worker` | Worker loop, processors, retry and backoff logic |
 | `internal/scheduler` | Polling loop for retries, schedules, reclaim and orphans |
+| `internal/shutdown` | Bounded `WaitGroup` wait used by graceful shutdown |
 | `internal/metrics` | `expvar` counters and gauges |
 
 **Key design decisions**
@@ -276,13 +280,14 @@ All four are partial, so they stay small however many completed jobs accumulate.
 
 ```text
 main
- |-- worker 1..N   loop: Dequeue -> claim -> process -> finish
+ |-- dequeuers 1..D   loop: queue.Dequeue -> unbuffered channel
+ |-- worker 1..N      loop: Dequeue (from the channel) -> claim -> process -> finish
  |     \-- heartbeat goroutine (one per running job)
- |-- scheduler     loop: tick every second
- \-- HTTP server   handlers run in per-request goroutines
+ |-- scheduler        loop: tick every second
+ \-- HTTP server      handlers run in per-request goroutines
 ```
 
-**Worker pool.** `WORKERS` (default 4) goroutines each loop on `Dequeue`. An idle worker blocks and uses no CPU. One queue delivery goes to exactly one receiver, so the queue spreads jobs across workers with no extra code. The same ID can still be delivered more than once (see below), which is why the claim is atomic.
+**Worker pool.** `WORKERS` (default 4) goroutines each loop on `Dequeue`. An idle worker blocks and uses no CPU. One queue delivery goes to exactly one receiver, so the work spreads across workers with no extra code. The same ID can still be delivered more than once (see below), which is why the claim is atomic.
 
 **Nothing mutable is shared between workers.** A `Worker` holds its ID and two references. Each worker loads its own `*job.Job` from the database. The shared state is the database row, and ownership of that row is decided by SQL (see Job lifecycle).
 
@@ -304,27 +309,28 @@ main
 1. `signal.NotifyContext` cancels the root context.
 2. Workers stop taking new jobs. A job already dequeued runs under `context.WithoutCancel`, so shutdown stops the waiting, not the working.
 3. `http.Server.Shutdown` stops accepting requests and waits up to 5 s for in-flight ones.
-4. `wg.Wait()` blocks until every worker and the scheduler have returned.
-5. Deferred closes run last, so the database pool is closed after workers finish writing.
+4. The process waits for every worker, dequeuer and the scheduler, but only until 8 s after the signal (Docker's kill timeout is 10 s). `internal/shutdown.WaitTimeout` does this, because `wg.Wait()` cannot be interrupted.
+5. If everything finished, deferred closes run, so the database pool is closed after workers finish writing. If the deadline passes, the process logs `drain deadline exceeded` and exits with code 1, skipping the deferred closes.
 
-Observed: `docker compose stop` with a job mid-flight let it finish, wrote its final status, and exited in under 3 s.
+A job left mid-flight at the deadline stays `processing` until its heartbeat goes stale, and the next scheduler reclaims it.
 
-Already-dequeued jobs are allowed to finish during shutdown. There is no separate drain deadline: `wg.Wait()` is unbounded. Each attempt is capped by its 10 s deadline, but only if the processor honors its context. A processor that ignores its context can delay termination until the container runtime kills the process (10 s by default in Docker Compose), which strands the job in `processing` until the heartbeat goes stale.
+Observed:
+
+- **Normal path:** a `report` (4 s) in flight when the signal arrived finished, wrote its final status, and the process exited 0 about 1.5 s after `shutting down`.
+- **Hang path, checked once, manually:** with a temporary processor that ignored its context (a 30 s sleep), `drain deadline exceeded` appeared 8.0 s after `shutting down` and the exit code was 1. The `WaitTimeout` unit tests cover the wait itself. The wiring in `main` was not covered by an automated test.
+- **Unexplained:** in several earlier attempts, `docker compose stop` on Docker Desktop ended the hung container with exit 137 after about 3.5 s, before our 8 s deadline. The cause was not determined. Sending `SIGTERM` inside the container (`docker compose exec app kill -TERM 1`) behaved as designed.
+
+Each attempt is capped by its 10 s deadline, but only if the processor honors its context. A processor that ignores its context is what the drain deadline exists for.
 
 **Redis queue details.**
 
-- `Dequeue` uses `BRPOP` with a 1 s timeout in a loop, so a cancelled context is noticed within a second.
-- A worker that gets a dequeue error logs it and retries after a second. It exits only on shutdown.
-- Goroutines are cheap; Redis connections are not. Each idle worker holds one blocked `BRPOP` connection. If the pool is smaller than the number of simultaneously blocked dequeuers, workers wait for connections instead of consuming jobs. The client default is `10 x GOMAXPROCS` (160 here). At 256 workers the run hung until `pool_size=400` was set. The cause (pool exhaustion plus workers exiting on dequeue errors) was inferred from the fix working; I did not capture a log of the failure.
-- A better design is a few dequeuer goroutines feeding workers over an internal channel, which needs a handful of connections:
+- Workers do not read Redis directly. A `Fanout` runs a few dequeuer goroutines (`DEQUEUERS`, default 4) that pop IDs and hand them to all workers over an unbuffered channel, so Redis connections scale with dequeuers, not workers.
+- Before the fanout, each idle worker held a blocked `BRPOP` connection. The client default pool is `10 x GOMAXPROCS` (160 on the test machine), and 256 workers hung on it until `pool_size=400` was set. The cause (pool exhaustion plus workers exiting on dequeue errors) was inferred from the fix working; no log of the failure was captured. With the fanout, 256 workers completed 6000 jobs on the default pool (239.4 jobs/s, one run).
+- `Dequeue` on the Redis queue uses `BRPOP` with a 1 s timeout in a loop, so a cancelled context is noticed within a second. A dequeuer that gets an error logs it and retries after a second. It exits only on shutdown.
+- The channel is unbuffered on purpose, so one instance cannot hoard IDs while another instance's workers sit idle. No test checks this property.
+- IDs held by a dequeuer are lost if the process crashes. The rows stay `queued`, so the orphan sweep recovers them.
 
-```text
-Redis -> few dequeuer goroutines -> internal channel -> worker pool
-```
-
-  Not implemented.
-
-**Race detector.** The `store`, `queue`, `api`, `metrics`, `service` and `worker` packages pass `go test -race ./...`, run inside Docker because `-race` needs cgo. The worker test runs 4 workers over 50 jobs, every ID delivered twice, and asserts each job ran exactly once. The scheduler and `cmd/server` have no tests, so their concurrency has not been checked under `-race`.
+**Race detector.** The `store`, `queue`, `api`, `metrics`, `service`, `shutdown`, `scheduler` and `worker` packages pass `go test -race ./...`, run inside Docker because `-race` needs cgo. The worker test runs 4 workers over 50 jobs, every ID delivered twice, and asserts each job ran exactly once. `cmd/server` has no tests, so its wiring has not been checked under `-race`. The detector was verified to work by planting a race (see Testing).
 
 ## Failure handling and idempotency
 
@@ -336,11 +342,11 @@ The system provides **at-least-once execution**. Exactly-once is not achievable 
 |---|---|
 | Processor returns an error | Transient: `retrying` with backoff, until `max_attempts`, then `failed`. Permanent (marked by the processor): `failed` immediately |
 | Attempt exceeds 10 s | Context deadline, a transient error |
-| Worker process dies mid-job | Heartbeat goes stale (6 s). The scheduler moves the job to `retrying` (or `failed` if attempts are used up) |
+| Worker process dies mid-job | Heartbeat goes stale (6 s). The scheduler moves the job to `retrying` (or `failed` if attempts are used up). Observed after a hard kill and after a hung drain |
 | Process restarts | `retrying` and scheduled jobs live in PostgreSQL, so the new scheduler finds them. Observed: a job retried across a restart (one run) |
-| A queued ID is lost (restart with the in-memory queue, crash between insert and enqueue) | The orphan sweep re-enqueues `queued` rows older than 10 s |
+| A queued ID is lost (restart with the in-memory queue, crash between insert and enqueue, ID held by a dequeuer at a crash) | The orphan sweep re-enqueues `queued` rows older than 10 s |
 | Queue full | 503, and the just-inserted row is deleted |
-| Redis down | `/readyz` returns 503 and `/healthz` stays 200. Workers log and retry |
+| Redis down | `/readyz` returns 503 and `/healthz` stays 200. Dequeuers log and retry |
 | A paused worker wakes after being replaced | Its writes match no row (`ErrNotOwner`) and are discarded |
 
 The orphan sweep may enqueue an ID that is already waiting in Redis, because the scheduler cannot tell a lost message from one that is simply queued. This is intentional: duplicate delivery is safe because a worker must claim the job atomically from PostgreSQL before processing it. The sweep only lists `queued` rows older than 10 s whose `run_at` has passed, and it does not change them, so under a backlog deeper than 10 s it re-enqueues IDs already in Redis on every tick (up to 50 per tick). That overhead was not measured.
@@ -424,7 +430,7 @@ Reading them:
 
 **Health checks.** `/healthz` (liveness) answers whenever the process can. `/readyz` (readiness) pings PostgreSQL and the queue with a 2 s timeout. With Redis stopped, `/healthz` stayed 200 and `/readyz` returned 503 with `"queue":"unavailable"`. The two are separate on purpose: restarting the app does not fix a dead dependency, but sending it traffic does not help either.
 
-**Profiling.** `net/http/pprof` listens on `127.0.0.1:6060` inside the container only, not through the proxy. Capture with `docker compose exec app wget ...`, and analyze inside the `test` container because Windows Application Control blocks `go tool pprof` on the host.
+**Profiling.** `net/http/pprof` listens on `127.0.0.1:6060` inside the container only, not through the proxy. Capture with `docker compose exec app wget ...`, and analyze inside the `test` container (use `--no-deps`) because Windows Application Control blocks `go tool pprof` on the host.
 
 ## Performance results
 
@@ -434,39 +440,46 @@ All runs: one Windows laptop (16 logical CPUs), Docker Desktop, one app replica,
 
 | Workers | Jobs | Throughput | Efficiency | Queue wait p95 | Execution p95 |
 |---|---|---|---|---|---|
-| 4 | 100 | 3.9 jobs/s | 98% | 23.3 s | 1.016 s |
-| 16 | 100 | 13.9 jobs/s | 87% | 5.0 s | 1.008 s |
+| 4* | 100 | 3.9 jobs/s | 98% | 23.3 s | 1.016 s |
+| 16* | 100 | 13.9 jobs/s | 87% | 5.0 s | 1.008 s |
 | 64 | 3000 | 59.3 jobs/s | 93% | 42.8 s | 1.053 s |
 | 128 | 3000 | 122.1 jobs/s | 95% | 18.9 s | 1.006 s |
 | 128 | 6000 | 119.2 jobs/s | 93% | 38.6 s | 1.081 s |
-| 256 | 6000 | 234.5 jobs/s | 92% | 15.1 s | 1.139 s |
-| 256 | 6000 | 230.1 jobs/s | 90% | 14.5 s | 1.059 s |
+| 256 (256 blocked `BRPOP`, pool 400) | 6000 | 234.5 jobs/s | 92% | 15.1 s | 1.139 s |
+| 256 (256 blocked `BRPOP`, pool 400) | 6000 | 230.1 jobs/s | 90% | 14.5 s | 1.059 s |
+| 256 (4 dequeuers, pool 400) | 6000 | 241.1 jobs/s | 94% | 16.1 s | 1.007 s |
+| 256 (4 dequeuers, pool 400) | 6000 | 242.0 jobs/s | 95% | 16.1 s | 1.007 s |
+| 256 (4 dequeuers, default pool) | 6000 | 239.4 jobs/s | 94% | 16.4 s | 1.007 s |
 
-Efficiency is throughput divided by workers (the ideal is one job per worker per second). Short runs (100 jobs) are dominated by ramp-up and tail effects. The 32-worker run (24.0 jobs/s, 100 jobs) is omitted because its worker count was inferred, not logged.
+\* The worker count for these two rows came from configuration and the throughput, not from a `starting workers` log line, which did not exist yet. The 32-worker run (24.0 jobs/s, 100 jobs) is omitted for the same reason.
+
+Efficiency is throughput divided by workers (the ideal is one job per worker per second). Short runs (100 jobs) are dominated by ramp-up and tail effects.
 
 What the data supports:
 
-- **Throughput scales almost linearly up to 256 workers**, at about 90% efficiency. It is worker-bound, not API-bound.
-- **The API is never the limit.** Submit p95 was 8 to 9 ms with 4 clients. Higher client counts raised it (34 to 97 ms with 10 to 50 clients), partly the test machine.
+- **Throughput scales almost linearly up to 256 workers**, at about 90 to 95% efficiency. It is worker-bound, not API-bound.
+- **The fanout fixed the one scaling failure we hit.** 256 workers with one blocked `BRPOP` each hung on the default Redis pool. With 4 dequeuers they completed on the default pool, at throughput equal to or about 5% above the earlier runs.
+- **The API is never the limit.** Submit p95 was 6 to 9 ms with 4 clients. Higher client counts raised it (34 to 97 ms with 10 to 50 clients), partly the test machine.
 - **Backpressure works.** With a 100-ID queue, 500 submissions gave about 105 `202`s and about 395 `503`s within about 300 ms, and the system stayed up.
 - **Two replicas were run once** (kill-one-instance recovery). Heartbeat reclaim and fencing recovered the dead instance's jobs. Throughput with two replicas was not measured.
 
 What the data does not support:
 
-- **Execution p95 is noisy.** Identical 256-worker runs gave 1.139 s and 1.059 s, and 128 workers gave 1.006 s and 1.081 s. The ranges overlap, so there is no evidence of contention starting at any worker count. The p99 of one run was 1.612 s with a 1.851 s max; the cause was not found.
+- **Execution p95 is noisy.** Identical 256-worker runs without the fanout gave 1.139 s and 1.059 s, and 128 workers gave 1.006 s and 1.081 s, so ranges overlap and there is no evidence of contention starting at any worker count. A 1.612 s p99 (1.851 s max) appeared in one pre-fanout run and did not recur in three fanout runs. Fewer Redis connections is a plausible reason, but it was not shown.
 - **The pgx pool was predicted to cap throughput near 16 connections. It did not.** Workers hold a connection only for brief claim and finish queries, not during the job. This holds for simulated jobs. Real jobs that hold a connection throughout would differ.
 
-**CPU profiles** (pprof, 12 to 20 s windows):
+**CPU profiles** (pprof, 12 to 20 s windows, one window each):
 
-- Idle with 256 workers: 1.4 to 2.25% CPU. About 76% of it is `Redis.Dequeue`, the parked `BRPOP` calls waking once a second.
-- Under submission load: 19% CPU, about 62% in syscalls and futex (network I/O, goroutine parking), about 32% in HTTP serving. No application function was a hotspot.
-- A CPU profile only shows running code, so it cannot explain the p99 tail. A block profile would be the next tool.
+- Idle with 256 workers, each blocked in `BRPOP`: 1.4 to 2.25% CPU. About 76% of it was `Redis.Dequeue`.
+- Idle with 4 dequeuers: 0.13% CPU (20 ms in 15 s). Only the scheduler's per-second queries remained.
+- Under submission load (before the fanout): 19% CPU, about 62% in syscalls and futex (network I/O, goroutine parking), about 32% in HTTP serving. No application function was a hotspot.
+- A CPU profile only shows running code, so it cannot explain a latency tail. A block profile would be the next tool.
 
 **Micro-benchmark:** `backoff` costs 11 ns and allocates nothing, so it is not worth optimizing.
 
-**Load test defects found and fixed.** Three results came from bugs we then fixed, not from the system: ghost rows left by `503` responses (the row is now deleted), the worker count label printing before the environment variable was read, and a 5000-ID queue size set on a stray second `NewRedis` call so it had no effect. The README numbers above are from after those fixes.
+**Load test defects found and fixed.** Several results came from bugs we then fixed, not from the system: ghost rows left by `503` responses (the row is now deleted), the worker count label printing before the environment variable was read, and a 5000-ID queue size set on a stray second `NewRedis` call so it had no effect. The numbers above are from after those fixes.
 
-**Open questions.** The p99 tail, the cost of the orphan sweep under deep backlogs, and throughput with several replicas.
+**Open questions.** The cost of the orphan sweep under deep backlogs, throughput with several replicas, and why the fanout runs show a tighter execution tail.
 
 ## Running locally
 
@@ -505,18 +518,21 @@ Invoke-RestMethod "http://localhost:8080/jobs/$($r.id)"
 |---|---|
 | `DATABASE_URL` | PostgreSQL connection string (required) |
 | `QUEUE` | `redis`, or anything else for the in-memory queue |
-| `REDIS_URL` | For example `redis://redis:6379/0?pool_size=400`. Keep `pool_size` above `WORKERS` |
+| `REDIS_URL` | For example `redis://redis:6379/0`. With the fanout, `pool_size` no longer needs to exceed `WORKERS` |
 | `WORKERS` | Number of worker goroutines. Default 4 when unset or invalid |
+| `DEQUEUERS` | Goroutines reading the queue and feeding the workers. Default 4 |
 
-The queue capacity is hard-coded in `cmd/server/main.go` (5000 for Redis, 100 for in-memory). Check the `starting workers` log line to see the count actually in use.
+The queue capacity is hard-coded in `cmd/server/main.go` (5000 for Redis, 100 for in-memory). Check the `starting workers` log line to see the counts actually in use.
 
 **Several replicas.** `docker compose up -d --build --scale app=2`. The proxy resolves `app` through Docker DNS. Metrics are per process, so read them from one replica at a time.
 
 **Gotchas we hit**
 
 - **502 from the proxy** right after recreating containers: `docker compose restart proxy`.
-- **Windows Application Control** blocked freshly compiled Go binaries on the host (`go run` of the server, `go test` binaries, `go tool pprof`). Tests and profile analysis run inside Docker instead. `go build`, `go vet` and `go run ./cmd/loadtest` worked on the host.
+- **Stale containers.** `docker compose up -d --build` can restart an old container instead of recreating it, which made one experiment run old code. Use `--force-recreate` and check that `docker inspect jobqueue-app-1 --format "{{.Image}}"` matches `docker image ls jobqueue-app`.
+- **Windows Application Control** blocked freshly compiled Go binaries on the host (`go run` of the server, `go test` binaries, `go tool pprof`, and at times `go run ./cmd/loadtest`). Tests, profile analysis and, when needed, the load test run inside Docker instead. `go build` and `go vet` worked on the host.
 - **Do not run `docker compose --profile test run` without `--no-deps` while the app is up.** It recreated PostgreSQL and Redis once and took the app down with them.
+- **`docker compose stop` on Docker Desktop** ended a hung container with exit 137 after about 3.5 s in several runs, before the 8 s drain deadline. Cause not determined.
 - **PowerShell prints every non-2xx response as an exception.** The load test counts them instead.
 
 ## Testing
@@ -528,7 +544,7 @@ Tests run inside Docker, because the database and Redis are only reachable on th
 docker compose --profile test run --rm test go test -race ./... -count=1
 
 # pure unit tests, no database or Redis needed
-docker compose --profile test run --rm --no-deps test go test ./internal/worker ./internal/service ./internal/api ./internal/metrics -count=1
+docker compose --profile test run --rm --no-deps test go test ./internal/worker ./internal/service ./internal/api ./internal/metrics ./internal/shutdown ./internal/scheduler -count=1
 ```
 
 `-count=1` disables Go's result cache. Tests that need a database or Redis skip themselves when `TEST_DATABASE_URL` or `TEST_REDIS_URL` is unset.
@@ -536,20 +552,23 @@ docker compose --profile test run --rm --no-deps test go test ./internal/worker 
 | Package | What is tested |
 |---|---|
 | `store` | Integration tests against real PostgreSQL: lifecycle transitions, fencing (a replaced worker is rejected), heartbeat, stale reclaim, due retries, orphan listing, scheduled listing, oldest-queued age, idempotency key, idempotent charge, guarded delete |
-| `queue` | In-memory and Redis: FIFO, `ErrFull`, cancellation. Redis tests use a random key per test and delete it afterwards |
+| `queue` | In-memory and Redis: FIFO, `ErrFull`, cancellation. Redis tests use a random key per test and delete it afterwards. `Fanout`: each ID is delivered exactly once, and at most `dequeuers` goroutines read the source at once |
 | `worker` | Concurrency test with fake store and queue: 4 workers, 50 jobs, every ID delivered twice, each job must run exactly once. Also backoff bounds and permanent-error classification |
+| `scheduler` | Fakes for store and queue: one tick enqueues scheduled, retry and orphan IDs; a full queue requeues the retry without blocking the rest; a failing reclaim does not stop the tick; `Run` ticks and stops on cancel. One test pins current behavior (a `ClaimDue` error skips the orphan sweep for that tick) |
+| `shutdown` | `WaitTimeout` returns early when the group finishes, and gives up on time when it does not |
 | `service` | Scheduling rules and cleanup after a rejected enqueue, using fakes |
 | `api` | Request-ID validation |
 | `metrics` | That every expected metric name is registered |
 
 **Why the store tests hit a real database.** Five SQL bugs got past the compiler and `go vet`: a missing `=`, a wrong status literal (twice), and an untyped parameter inside a `CASE` that PostgreSQL inferred as `text`. SQL in a Go string is just text, so only running it finds these.
 
-**The race detector** was verified by planting a bug: removing the lock from the fake store's `MarkCompleted` produced `WARNING: DATA RACE` and a failing test. The scheduler and `cmd/server` have no tests.
+**The race detector** was verified by planting a bug: removing the lock from the fake store's `MarkCompleted` produced `WARNING: DATA RACE` and a failing test. `cmd/server` has no tests.
 
 **Caveats**
 
 - The store tests share the database with the running app, and a few (`ClaimDue`, `ReclaimStale`) scan the whole table. Stop the app first, or point `TEST_DATABASE_URL` at a separate database.
-- Several tests were not individually checked by breaking them on purpose. Only the race test was.
+- Several tests were not individually checked by breaking them on purpose. Only the race test and a few others were.
+- The unbuffered hand-off in `Fanout` is a design choice that no test checks.
 
 **Load test**
 
@@ -557,7 +576,13 @@ docker compose --profile test run --rm --no-deps test go test ./internal/worker 
 go run ./cmd/loadtest -n 3000 -c 4 -type notification
 ```
 
-Flags: `-url`, `-n` (requests), `-c` (concurrent clients), `-type`, `-wait`. It reports submit latency for accepted requests, rejected and failed counts, then polls every accepted job by ID and reports queue wait, execution time and end-to-end throughput. Known defect: the progress counter prints `0/N` throughout; the final summary is correct.
+If Windows blocks the compiled binary, run it in the test container instead, pointing at the proxy:
+
+```powershell
+docker compose --profile test run --rm --no-deps test go run ./cmd/loadtest -url http://proxy:80 -n 3000 -c 4 -type notification
+```
+
+Flags: `-url`, `-n` (requests), `-c` (concurrent clients), `-type`, `-wait`. It reports submit latency for accepted requests, rejected and failed counts, then polls every accepted job by ID and reports queue wait, execution time and end-to-end throughput. The polling adds some load of its own (up to 32 pollers every 500 ms).
 
 ## Limitations
 
@@ -568,9 +593,10 @@ Flags: `-url`, `-n` (requests), `-c` (concurrent clients), `-type`, `-wait`. It 
 - Migrations are applied by hand.
 - Several recorded numbers came from single runs.
 - The orphan sweep duplicates enqueues under deep backlogs; the overhead is unmeasured.
-- The shutdown drain is unbounded (see Concurrency model).
-- The scheduler and `cmd/server` have no tests, and the scheduler's coordination across replicas has not been load tested.
-- One blocked Redis connection per worker does not scale past the pool size.
+- IDs held by a dequeuer are lost on a crash and recovered only by the orphan sweep, after its 10 s grace.
+- The scheduler has unit tests with fakes, but its coordination across replicas has not been load tested or tested against a real database. `cmd/server` has no tests.
+- A `ClaimDue` error makes a tick return early, which skips the orphan sweep for that tick. A test pins this; it is arguably the wrong behavior.
+- The drain-deadline wiring in `main` was verified once by hand, not by an automated test.
 
 ## Lessons learned
 
@@ -579,9 +605,10 @@ Flags: `-url`, `-n` (requests), `-c` (concurrent clients), `-type`, `-wait`. It 
 3. **A queue message is a hint, not the truth.** Because the queue carries only IDs and PostgreSQL holds the state, lost or duplicated messages are recoverable (orphan sweep, atomic claim) and harmless.
 4. **Exactly-once does not exist across a crash.** We reproduced a double charge with every retry mechanism behaving correctly. Only an idempotent side effect fixed it.
 5. **Polling beat timers for recovery.** In-memory timers die with the process. A scheduler that reads PostgreSQL survived a restart. The cost is up to a second of delay.
-6. **Contexts need thought on shutdown and failure.** A job must finish after shutdown starts (`WithoutCancel`), and the write that records a timeout needs a fresh context, or the row is stranded.
-7. **Measure, and label what you measured.** Several of my predictions were wrong: the pgx pool did not cap throughput, and execution p95 did not show contention at 256 workers. Worker-count labels were wrong twice (a log line printed before the variable was read, and an edit landed on the wrong `NewRedis` call). A load test also exposed ghost rows left by `503` responses, which we fixed. Run-to-run noise (1.139 s vs 1.059 s) is larger than some differences we were tempted to explain.
-8. **Resources hide behind goroutines.** Goroutines are cheap, but each idle worker held a Redis connection, and 256 workers hung until the pool was resized.
-9. **Environment friction is a design input.** Windows security policy pushed everything into Docker early, which made the setup closer to deployment.
+6. **Contexts need thought on shutdown and failure.** A job must finish after shutdown starts (`WithoutCancel`), the write that records a timeout needs a fresh context, or the row is stranded, and the wait for workers needs its own deadline, because `wg.Wait()` cannot be interrupted.
+7. **Measure, and label what you measured.** Several predictions were wrong: the pgx pool did not cap throughput, and execution p95 did not show contention at 256 workers. Worker-count labels were wrong twice (a log line printed before the variable was read, and an edit landed on the wrong `NewRedis` call). A load test also exposed ghost rows left by `503` responses. Run-to-run noise (1.139 s vs 1.059 s) is larger than some differences we were tempted to explain.
+8. **Resources hide behind goroutines.** Goroutines are cheap, but each idle worker held a Redis connection, and 256 workers hung until the pool was resized. Putting a few dequeuers in front of the workers removed the problem instead of resizing around it.
+9. **Check that an experiment tests what you think it tests.** The hang-path test failed to run several times: a stale container with old code, a job that had not started yet, and a log filter that hid the line we needed. Each time the output looked like a result and was not. Confirm the image ID, confirm `job started` appeared, and read the unfiltered log before drawing a conclusion.
+10. **Environment friction is a design input.** Windows security policy pushed tests, profiling and sometimes the load test into Docker, which made the setup closer to deployment.
 
-**Not done, in rough order of value:** a few dequeuer goroutines instead of one blocked Redis connection per worker; a bounded shutdown drain; a block profile to explain the p99 tail; Prometheus metrics with labels and histograms; automatic migrations; tests for the scheduler; a load test with several replicas; restricting `/debug/vars`.
+**Not done, in rough order of value:** a block profile to look into the latency tail; an automated test of the drain deadline through `main`; Prometheus metrics with labels and histograms; automatic migrations; a load test with several replicas; restricting `/debug/vars`; deciding whether a failed `ClaimDue` should skip the orphan sweep.
