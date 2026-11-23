@@ -21,6 +21,7 @@ import (
 	"github.com/anandhubiju-dev/jobqueue/internal/queue"
 	"github.com/anandhubiju-dev/jobqueue/internal/scheduler"
 	"github.com/anandhubiju-dev/jobqueue/internal/service"
+	"github.com/anandhubiju-dev/jobqueue/internal/shutdown"
 	"github.com/anandhubiju-dev/jobqueue/internal/store"
 	"github.com/anandhubiju-dev/jobqueue/internal/worker"
 
@@ -166,6 +167,9 @@ func main() {
 	<-ctx.Done()
 	slog.Info("shutting down")
 
+	// Docker sends SIGKILL 10 s after SIGTERM. Finish before that.
+	drainBy := time.Now().Add(8 * time.Second)
+
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelShutdown()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
@@ -173,6 +177,9 @@ func main() {
 	}
 	_ = pprofSrv.Shutdown(shutdownCtx)
 
-	wg.Wait()
+	if !shutdown.WaitTimeout(&wg, time.Until(drainBy)) {
+		slog.Error("drain deadline exceeded, exiting with work still running")
+		os.Exit(1)
+	}
 	slog.Info("shutdown complete")
 }
